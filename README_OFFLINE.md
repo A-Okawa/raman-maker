@@ -1,0 +1,121 @@
+# Raman Maker
+
+ラマン・FT-IR スペクトルの論文用グラフを描く Streamlit アプリです。XRD Maker（XRD描画app）・グラフ描画app と同じ色の組み合わせ・文字の書式・フォント・図のひな形を使い、同じ体裁の図を並べられます。
+
+- Web 版：GitHub のリポジトリから Streamlit Community Cloud で公開します（下の「公開（Streamlit Cloud）」）。
+- PC 版：ZIP を展開して Python で動かします。一度セットアップすれば、起動・データ読込・描画・作業の保存／再開はインターネット接続なしで使えます。
+
+## できること
+
+- **読める形式**：JASCO Spectra Manager の CSV / TXT（`TITLE … XYDATA … ##### Extended Information`。拡張情報のレーザー波長・露光時間・積算回数などは「測定条件」で見られます）、Renishaw WiRE の TXT 書き出し（`#Wave #Intensity`。`#X #Y #Wave #Intensity` のマップ書き出しは位置ごとに別スペクトル）と `.wdf`（`renishawWiRE` パッケージ。マップ・連続測定は平均／1 本ずつ／最初の 1 本を選べます）、`##TITLE=` で始まる FT-IR テキスト（`##DATA TYPE=INFRARED SPECTRUM`・`##XUNITS=1/CM`・`##YUNITS=Abs` または `%T`、そのあと `波数 \t 値` の行）、JCAMP-DX（`##XYDATA=(X++(Y..Y))` の AFFN と SQZ / DIF / DUP 圧縮、`(XY..XY)`、`##TITLE=` が複数あるファイルはブロックごとに別スペクトル。横軸が µm・nm なら cm⁻¹ に換算）、RRUFF データベースの TXT、2 列以上の XY / CSV / TXT / DAT（ヘッダー行があれば列名がラベルに。`x, y, y, y` も `x, y, x, y` も可、小数点カンマも可）、Excel（.xlsx、全シート）。
+- **FT-IR モード**：ファイルの `DATA TYPE` が INFRARED なら自動で FT-IR になります（「測定の種類」で手動でも切り替え可）。横軸は波数で高波数が左（「横軸を反転」で戻せます）、縦軸は吸光度か透過率 (%) を選びます。データの単位は `YUNITS`（Abs・%T・TRANSMITTANCE など）や列名から判定し、記載のないファイルは吸光度として読むので、透過率のデータはスペクトル設定パネルの「データの縦軸」で指定します。前処理（スパイク・平滑化・ベースライン・正規化）は吸光度で行い、透過率表示では T = 10^(−A) に戻して描きます（透過率の表示ではピークは谷になり、ピーク値はその下に付きます）。
+- **並べ方**：表示範囲、正規化（最大値＝1、指定範囲の最大値＝1、最小 0・最大 1、面積＝1）、自動の積み重ね（前のスペクトルの最大値に対する倍率）とスペクトルごとのオフセット、または Y 位置と倍率の手動指定。
+- **前処理**：宇宙線スパイクの除去（Whitaker–Hayes 法）、Savitzky–Golay 平滑化、ベースライン差し引き（最小値を 0・直線・多項式・非対称最小二乗 ALS）。順番は、表示範囲で切り出し → スパイク → 平滑化 → ベースライン → 正規化。元のファイルは変えません。処理後の値は CSV で保存できます。
+- **ピークと注記**：ピークの自動検出（プロミネンス比・最小間隔）、ピーク値の表示（横書き／縦書き、桁数）、ローレンツ／ガウス関数による中心と半値幅のフィット（ピーク一覧、CSV 保存）。手入力の注記（`796 SiC (TO)` で位置の破線とラベル、`770-822 window` で帯）。ラベルは図の上に、重ならないよう段を分けて並びます。拡大図（インセット）。
+- **色・文字・ひな形**：グラフ描画app・XRD描画appと同じ色の組み合わせ（論文用、Okabe–Ito、青・朱・緑・灰の濃淡、viridis、matplotlib 標準。濃淡の一番薄い色も白地とのコントラスト 3:1 以上）、色を付ける範囲（表示順）と範囲外の色、`colors.csv` の名前付きの色。ラベルの書式は `<i>…</i>`・`<b>…</b>`・`_{…}`・`^{…}`（Ctrl+I / B / , / . のショートカットも同じ）。図のひな形「グラフ描画appと同じ体裁 · 88 × 70 mm」（Arial 7 pt、目盛り 6.5 pt、軸 0.5 pt、曲線 0.9 pt、外向きの目盛り、上と右の枠なし）が初期設定です。
+- **出力**：PDF / SVG（ベクトル）、PNG / TIFF（300 / 600 DPI）。ファイル名はラマンでは `raman_result.*`、FT-IR では `ftir_result.*` です。作業（データ・表示順・色・ラベル・処理・図の設定）は JSON で保存・再開、作図スタイルだけの JSON も保存・読み込みできます（XRD描画appのスタイルも共通の項目だけ開けます）。PC 版は自動保存します。
+
+## PC 版のセットアップ
+
+**初回セットアップには Python と依存パッケージが必要です。通常の ZIP は Python を含みません。**
+
+### Windows
+
+1. Python 3.12 をインストールします。Python のインストーラーでは「Add Python to PATH」を選択してください。
+2. `Raman-Maker-PC.zip` をすべて展開します。ZIP 内から直接実行しないでください。
+3. `setup_windows.bat` をダブルクリックします。初回はパッケージのダウンロードに数分かかる場合があります。
+4. セットアップ完了後、`launch_windows.bat` をダブルクリックします。ブラウザーが自動で開きます。
+5. 終了するときは、起動時に開いたコマンドプロンプトで **Ctrl+C** を押してください。
+
+### macOS
+
+1. Python 3.12 をインストールします（Python 3.10 以降に対応、検証環境は Python 3.12）。
+2. ZIP をすべて展開し、`setup_mac.command` を開きます。
+3. セットアップ完了後、`launch_mac.command` を開きます。ブラウザーが自動で開きます。
+4. 終了するときは、起動時に開いたターミナルで **Ctrl+C** を押してください。
+
+`.command` を開けない場合は、ターミナルで展開先へ移動し、以下を実行できます。
+
+```sh
+bash setup_mac.command
+bash launch_mac.command
+```
+
+macOS のセキュリティ確認が表示される場合は、ファイルの作成元と内容を確認してから、OS の案内に沿って許可してください。
+
+### Linux
+
+Python 3.10 以降と venv を用意し、展開先で以下を実行します。初回セットアップ時にはインターネットが必要です。
+
+```sh
+bash setup_linux.sh
+bash launch_linux.sh
+```
+
+### 初回セットアップもオフラインにする
+
+Python 本体は別途インストールが必要です。パッケージは、**対象 PC と同じ OS・CPU アーキテクチャ・Python バージョン**のオンライン環境で取得します。
+
+```sh
+python -m pip download --only-binary=:all: -r requirements.txt --dest wheelhouse
+```
+
+生成された `wheelhouse` フォルダーを、展開した Raman Maker のフォルダーへコピーします。その状態で setup ファイルを起動すると、自動的に wheelhouse だけからインストールします（`python setup_local.py --offline --wheelhouse ./wheelhouse` でも可）。
+
+## 公開（Streamlit Cloud）
+
+XRD Maker と同じ手順です。
+
+1. GitHub に新しいリポジトリ（例：`raman-maker`）を作り、この一式（`fonts/` と `colors.csv` を含む）を push します。`.gitignore` にある `.streamlit/secrets.toml`、`.venv/`、`dist/` は push しません。
+2. Streamlit Community Cloud で「New app」→ そのリポジトリ・`main`・`app.py` を選びます。
+3. アプリの Settings → Secrets に `password = "……"` を入れると、XRD Maker と同じパスワード画面が付きます。Secrets を入れなければパスワードなしで開きます。
+4. フォントは `fonts/` の Liberation Sans・Liberation Serif（Arial・Times New Roman と字幅が同じ。SIL Open Font License 1.1、`fonts/OFL.txt`）を同梱しているので、サーバーのフォントに頼りません。`packages.txt` は不要です。
+
+## 操作の保存・再開
+
+「作業を保存・ダウンロード」で `raman_project.json` を保存します。元のファイル、表示順、表示／非表示、ラベル、色、オフセット、前処理、注記、図の設定を含みます。再開するときは、上部の「保存した作業を開く」でこの JSON を選びます。
+
+PC 版は操作が確定するたびに `autosave.json` を更新します。再起動後、「前回の自動保存から再開」を押すと続きから作業できます。自動保存先はアプリのフォルダーとは別です。
+
+| OS | 既定の保存先 |
+| --- | --- |
+| macOS | `~/Library/Application Support/Raman Maker/` |
+| Windows | `%LOCALAPPDATA%\Raman Maker\` |
+| Linux | `~/.local/share/raman-maker/`（`XDG_DATA_HOME` 設定時はそちらを使用） |
+
+保存先を分けたい場合は、`launch_linux.sh --data-dir /任意の保存先` のように指定できます（Mac の launch ファイルや Windows の `.bat` も同じ引数を受け付けます）。ブラウザーのタブを閉じてもローカルサーバーは動き続けます。終了は起動ウィンドウの **Ctrl+C** で行ってください。PC 版は `127.0.0.1` のみに接続し、起動時に認証情報を設定する必要はありません。
+
+## 論文用の作図
+
+- 図サイズは mm / inch で指定できます。ひな形は寸法・文字サイズ・余白・線幅を設定し、投稿先の指定に合わせて調整してください。
+- PDF / SVG はベクトル出力、PNG / TIFF は 300 / 600 DPI で出力します。指定寸法を保持し、保存時に余白を自動で切り詰めません。PNG / TIFF は最大 3,600 万画素です。
+- PDF は TrueType フォントを埋め込みます。SVG は編集可能な文字または文字のパス化を選べます。Arial がない環境（Streamlit Cloud など）では字幅が同じ Liberation Sans で描き、SVG には Arial と書き込みます（手元の PC で開けば Arial になります）。
+- 注記のラベルは図の上に出ます。切れるときは「上余白をラベルに合わせる」を押すか、上余白を広げてください。
+- 「作図スタイル」は寸法・線・フォント・文字の大きさ・軸のラベル・ラベル位置・注記の体裁だけを JSON で保存します。別の試料にも同じ体裁を適用できます。
+
+## 開発者向け
+
+```sh
+python build_bundle.py --output dist/Raman-Maker-PC.zip
+python -m pytest tests            # 読み込み・処理・保存形式・UI（AppTest）のテスト
+python tests/make_test_data.py    # tests/data の合成スペクトルを作り直す
+```
+
+テストは Streamlit 1.32.0 と 1.66.1（Python 3.12）で通しています。FT-IR の試験データ（`ftir_*.txt`・`ftir_*.jdx`）も `make_test_data.py` が作る合成スペクトルです。`tests/data` の `sp.wdf`・`depth.wdf` は py-wdf-reader プロジェクトの例題ファイル（MIT License）です。
+
+共通モジュール（`figure_style.py`・`palettes.py`・`rich_text.py`・`fonts/`・`colors.csv`）は XRD Maker と同じファイルです。片方で直したら、もう片方にもコピーしてください。
+
+## 測定データの対応形式
+
+| 装置・形式 | 対応内容 |
+| --- | --- |
+| JASCO `.csv` / `.txt` | Spectra Manager のテキスト書き出し（`XYDATA`）。拡張情報を測定条件として保持。cp932（Shift_JIS）の書き出しも可。`DATA TYPE` が INFRARED SPECTRUM なら FT-IR モード |
+| FT-IR テキスト（`##TITLE=` …） | `##DATA TYPE=INFRARED SPECTRUM`・`##XUNITS=1/CM`・`##YUNITS=Abs` / `%T` のヘッダーと `波数 \t 値` の行。降順の書き出しも可 |
+| JCAMP-DX `.jdx` / `.dx` / `.jcamp` | `##XYDATA=(X++(Y..Y))`（AFFN・SQZ / DIF / DUP 圧縮）、`(XY..XY)`。`XFACTOR` / `YFACTOR` / `FIRSTX` / `LASTX` を反映。複数ブロックは別スペクトル。`##NTUPLES` は未対応 |
+| Renishaw `.txt` | WiRE のテキスト書き出し。マップ（`#X #Y #Wave #Intensity`）は位置ごとに別スペクトル |
+| Renishaw `.wdf` | `renishawWiRE` パッケージで読みます。1 本、連続測定、マップ（平均／1 本ずつ・最大 200 本／最初の 1 本） |
+| RRUFF `.txt` | `##NAMES=` などのヘッダーと `x, y` の行。鉱物名と ID がラベルになります |
+| `.xy` `.txt` `.csv` `.dat` `.asc` `.prn` `.tsv` | 2 列以上の数値。1 列目がラマンシフト。ヘッダー行があれば列名がラベル。`x, y, x, y` の並びも可 |
+| `.xlsx` | 全シート。シートの列の読み方はテキストと同じ |
+
+JASCO の `.jws`（バイナリ）は Spectra Manager からテキスト／CSV に書き出してください。横軸が µm・nm のファイルは波数 (cm⁻¹) に換算し、それ以外の単位はそのまま描いて警告を出します。
