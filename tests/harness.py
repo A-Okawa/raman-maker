@@ -39,7 +39,7 @@ if active:
         "style": encode_style_template(dict(st.session_state)),
         "peaks": peak_rows() if show_peaks else [],
         "fits": [None if fit_of(r) is None else
-                 {"ok": fit_of(r)["ok"], "message": fit_of(r)["message"], "r2": fit_of(r)["r2"],
+                 {"ok": fit_of(r)["ok"], "message": fit_of(r)["message"], "r2": fit_of(r)["r2"], "warnings": list(fit_of(r)["warnings"]),
                   "components": [(c["center"], c["fwhm"], c["height"], c["area"], c["share"], c["center_err"], c["at_limit"])
                                  for c in fit_of(r)["components"]]} for r in curves],
         "mpl_styles": [(l.get_linestyle(), l.get_color(), round(l.get_alpha() or 1.0, 2), len(l.get_xdata())) for l in fig.axes[0].get_lines()],

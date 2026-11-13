@@ -205,6 +205,16 @@ class FitTests(unittest.TestCase):
         table = at.dataframe[0].value
         self.assertEqual(len(table), 2)
         self.assertIn("面積比（対 成分1）", table.columns)
+        for column in ("判定", "換算 χ²", "残差の自己相関", "最大のパラメータ相関", "高さ／雑音"):
+            self.assertIn(column, table.columns)
+        self.assertEqual(set(table["判定"]), {"✓"} if not fit["warnings"] else {f"⚠ {len(fit['warnings'])}"})
+        self.assertEqual(bool(fit["warnings"]), any("確認が必要" in w.value for w in at.warning))
+        # one component for the two bands is reported, and smoothing is pointed out
+        wrong = harness.rerun(at, {"mfit_centers": "940", "mfit_max_shift": 30.0, "smooth_on": True})
+        self.assertTrue(harness.report(wrong)["fits"][0]["warnings"])
+        self.assertTrue(any("確認が必要" in w.value for w in wrong.warning))
+        self.assertTrue(any("平滑化したデータ" in i.value for i in wrong.info))
+        harness.rerun(at, {"mfit_centers": "925, 955", "mfit_max_shift": 15.0, "smooth_on": False})
         self.assertAlmostEqual(table["面積の割合 (%)"].sum(), 100.0, delta=0.2)
         # switches: no components, shaded components
         r = harness.report(harness.rerun(at, {"mfit_show_components": False}))

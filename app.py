@@ -34,7 +34,7 @@ from plot_extras import (
     add_mpl_zoom_inset, add_plotly_zoom_inset, top_labels_height, UNIT_HTML,
 )
 
-APP_VERSION = "1.3"
+APP_VERSION = "1.4"
 LAST_UPDATED = "2026-11-13"
 LOCAL_MODE = os.environ.get("RAMAN_MAKER_LOCAL") == "1"
 # Named colours in the graph app's format; copy that app's colors.csv here to share its names.
@@ -1749,6 +1749,21 @@ if active:
                     _reasons = {"too_few_points": ui("範囲内の点が足りません", "too few points in the range"),
                                 "center_outside": ui("初期位置がデータの範囲外です", "a starting position lies outside the data"),
                                 "flat": ui("範囲内のデータが平坦です", "the data are flat in the range")}
+                    _checks = {
+                        "misfit": ui("残差が雑音より大きい（換算 χ² が 3 超）。成分の数・関数・バックグラウンドが合っていない可能性があります。",
+                                     "the residual exceeds the noise (reduced χ² above 3): the number of components, the model or the background may not match."),
+                        "structured_residual": ui("残差が波打っている（隣り合う点の相関が 0.5 超）。取りこぼした成分か、形の合わない関数が疑われます。",
+                                                  "the residual has waves (neighbouring points correlate above 0.5): a missing component or a mismatched shape."),
+                        "correlated": ui("パラメータ同士が強く相関（0.98 超）。成分が互いに打ち消し合え、個々の値は決まっていません。成分を減らすか範囲を見直してください。",
+                                         "parameters correlate strongly (above 0.98): components can trade off and the individual values are not determined. Use fewer components or review the range."),
+                        "at_limit": ui("中心が動ける幅の端、または幅の上限・下限に張り付いた成分があります。", "a component ended at the edge of the allowed shift or at a width limit."),
+                        "weak_component": ui("高さが雑音の 3 倍に満たない成分があります。その成分は有意とは言えません。", "a component is lower than three times the noise and is not significant."),
+                        "uncertain_area": ui("面積の標準誤差が 20 % を超える成分があります。", "the standard error of an area exceeds 20 %."),
+                        "narrow_component": ui("半値幅がデータ点 4 つ分より狭い成分があります。スパイクや雑音に合わせている可能性があります。",
+                                               "a component is narrower than four data points and may follow a spike or noise."),
+                        "no_errors": ui("誤差を見積もれませんでした（パラメータが決まっていません）。", "the errors could not be estimated (the parameters are not determined)."),
+                    }
+                    _findings = []
                     fit_rows, curve_frames, residual_fig = [], [], go.Figure()
                     for row in curves:
                         result = fit_of(row)
@@ -1759,6 +1774,8 @@ if active:
                                        + _reasons.get(_why, ui("収束しませんでした", "no convergence")) + ui("）。", ")."))
                             continue
                         first = result["components"][0]
+                        _findings += [(name, code) for code in result["warnings"]]
+                        _verdict = "⚠ " + str(len(result["warnings"])) if result["warnings"] else "✓"
                         for number, c in enumerate(result["components"], start=1):
                             fit_rows.append({
                                 ui("スペクトル", "Spectrum"): name, ui("成分", "Component"): number,
@@ -1770,7 +1787,12 @@ if active:
                                 ui("面積比（対 成分1）", "Area ratio (to no. 1)"): c["area"] / first["area"] if first["area"] > 0 else None,
                                 ui("高さ比（対 成分1）", "Height ratio (to no. 1)"): c["height"] / first["height"] if first["height"] > 0 else None,
                                 **({"η": round(c["eta"], 3)} if mfit_model == "pvoigt" else {}),
+                                ui("高さ／雑音", "Height / noise"): round(c["snr"], 1) if np.isfinite(c["snr"]) else None,
+                                ui("判定", "Check"): _verdict,
                                 "R²": round(result["r2"], 5), "RMSE": result["rmse"],
+                                ui("換算 χ²", "Reduced χ²"): round(result["chi2_red"], 2) if np.isfinite(result["chi2_red"]) else None,
+                                ui("残差の自己相関", "Residual autocorrelation"): round(result["autocorr"], 2) if np.isfinite(result["autocorr"]) else None,
+                                ui("最大のパラメータ相関", "Largest parameter correlation"): round(result["max_correlation"], 3) if np.isfinite(result["max_correlation"]) else None,
                                 ui("上限・下限に到達", "At a limit"): "⚠" if c["at_limit"] else "",
                             })
                         frame = {ui("スペクトル", "Spectrum"): name, X_VALUE_NAME: result["x"], ui("データ", "Data"): result["y"],
@@ -1784,9 +1806,15 @@ if active:
                     if fit_rows:
                         fit_table = pd.DataFrame(fit_rows)
                         st.dataframe(fit_table, hide_index=True)
-                        if any(r[ui("上限・下限に到達", "At a limit")] for r in fit_rows):
-                            st.warning(ui("⚠ の成分は、中心が動ける幅の端か、幅の上限・下限に張り付いています。初期位置・成分の数・範囲を見直してください。",
-                                          "Components marked ⚠ ended at the edge of the allowed centre shift or at a width limit. Review the starting positions, the number of components or the range."))
+                        if _findings:
+                            st.warning(ui("**確認が必要なフィットがあります**", "**Some fits need a look**") + "\n"
+                                       + "\n".join(f"- {_name}: {_checks[_code]}" for _name, _code in _findings))
+                        else:
+                            st.success(ui("自動チェックでは問題は見つかりませんでした（残差・雑音比・パラメータ相関・上限下限・誤差）。残差のグラフも目で確かめてください。",
+                                          "The automatic checks found nothing (residual, noise ratio, parameter correlation, limits, errors). Look at the residual plot as well."))
+                        if smooth_on:
+                            st.info(ui("平滑化したデータをフィットしています。雑音が小さく見積もられるので、± の誤差は実際より小さく、換算 χ² と残差の自己相関は大きく出ます。定量には平滑化を外したフィットを勧めます。",
+                                       "The fitted data are smoothed. The noise is underestimated, so the ± errors are too small and the reduced χ² and residual autocorrelation too large. For numbers, fit without smoothing."))
                         residual_fig.add_hline(y=0, line=dict(color="black", width=0.8))
                         residual_fig.update_layout(height=220, margin=dict(l=60, r=20, t=30, b=40), plot_bgcolor="white", paper_bgcolor="white",
                                                    title=dict(text=ui("残差（データ − フィット）", "Residual (data − fit)"), font=dict(size=13, color="black")),
@@ -1801,6 +1829,8 @@ if active:
                         _d2.download_button(ui("📥 フィット曲線を CSV で保存", "📥 Save the fitted curves as CSV"),
                             data=pd.concat(curve_frames, ignore_index=True).to_csv(index=False).encode("utf-8-sig"),
                             file_name=f"{FILE_STEM}_fit_curves.csv", mime="text/csv", **WIDE_DOWNLOAD)
+                        st.caption(ui("目安：換算 χ² は 1 前後（雑音はデータの 2 階差分から推定）、残差の自己相関は 0 付近、パラメータ相関は 0.98 未満、高さ／雑音は 3 以上。",
+                                      "Guide: reduced χ² near 1 (the noise is estimated from second differences of the data), residual autocorrelation near 0, parameter correlation below 0.98, height / noise of 3 or more."))
                         st.caption(ui("前処理後のデータ" + ("（吸光度）" if IS_FTIR else "") + "に対する最小二乗フィットです。± は共分散行列から求めた標準誤差で、点ごとの雑音が独立であることを仮定しています。"
                                       "残差に波打ちが残る場合は、成分の数か関数が合っていません。面積・高さは正規化とベースラインの設定に依存するので、比で比べてください。"
                                       + ("　透過率の表示では曲線は図に重ねません（吸光度の表示で確認できます）。" if PEAKS_DOWN else ""),

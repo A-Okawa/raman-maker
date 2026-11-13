@@ -324,6 +324,25 @@ _LORENTZ_AREA = math.pi / 2                                # the same for a Lore
 MAX_FIT_PEAKS = 12
 
 
+# Thresholds of the fit diagnostics (see fit_multipeak's ``warnings``)
+CHI2_HIGH = 3.0               # reduced χ² above this: the model misses structure larger than the noise
+AUTOCORR_HIGH = 0.5           # lag-1 autocorrelation of the residual above this: waves, not noise
+CORRELATION_HIGH = 0.98       # |correlation| of two parameters above this: they trade off against each other
+SNR_LOW = 3.0                 # component height below this many noise σ
+RELATIVE_ERROR_HIGH = 0.2     # standard error of an area above this fraction of the area
+
+
+def estimate_noise(y) -> float:
+    """Point-to-point noise σ from second differences (robust: median absolute deviation), which
+    peaks and slopes that are wide compared with the point spacing do not inflate."""
+    y = _array(y)
+    if len(y) < 5:
+        return math.nan
+    second = y[:-2] - 2 * y[1:-1] + y[2:]
+    mad = float(np.median(np.abs(second - np.median(second))))
+    return 1.4826 * mad / math.sqrt(6.0)
+
+
 def peak_shape(x, model: str, height: float, center: float, fwhm: float, eta: float = 0.5):
     """One peak of ``height`` and full width at half maximum ``fwhm``; 'pvoigt' is the pseudo-Voigt
     eta·Lorentzian + (1 − eta)·Gaussian with a common FWHM."""
@@ -359,8 +378,13 @@ def fit_multipeak(x, y, centers, window=None, model: str = "lorentzian", backgro
     Returns a dict with ``ok``, ``message`` (why not, when not ok), ``x`` (the fitted points),
     ``y``, ``fit`` (total), ``background`` (curve), ``curves`` (one per component, without the
     background), ``residual``, ``r2``, ``rmse`` and ``components``: dicts with center, fwhm, height,
-    area, eta, their standard errors (``*_err``, from the covariance of the fit) and ``share``
-    (fraction of the summed area).
+    area, eta, their standard errors (``*_err``, from the covariance of the fit), ``share``
+    (fraction of the summed area) and ``snr`` (height over the noise).
+
+    Diagnostics: ``noise`` (σ from second differences of the data), ``chi2_red`` (≈ 1 when the
+    residual is as large as the noise), ``autocorr`` (lag-1 autocorrelation of the residual; near 0
+    for noise, towards 1 for waves), ``max_correlation`` (largest |correlation| between two
+    parameters) and ``warnings``, the codes of the checks that failed.
     """
     x, y = _array(x), _array(y)
     if model not in PEAK_SHAPES:
@@ -376,7 +400,8 @@ def fit_multipeak(x, y, centers, window=None, model: str = "lorentzian", backgro
     centers = [float(c) for c in centers]
     result = {"ok": False, "message": "", "model": model, "background_kind": background, "x": x, "y": y,
               "fit": None, "background": None, "curves": [], "residual": None, "r2": math.nan, "rmse": math.nan,
-              "components": []}
+              "components": [], "noise": math.nan, "chi2_red": math.nan, "autocorr": math.nan,
+              "max_correlation": math.nan, "warnings": []}
     n = len(centers)
     per_peak = 4 if model == "pvoigt" else 3
     n_background = FIT_BACKGROUNDS.index(background)
@@ -466,12 +491,46 @@ def fit_multipeak(x, y, centers, window=None, model: str = "lorentzian", backgro
             entry["area_err"] = float(math.sqrt(max(float(gradient @ block @ gradient), 0.0)))
         components.append(entry)
     total_area = sum(c["area"] for c in components)
+    noise = estimate_noise(y)
     for entry in components:
         entry["share"] = entry["area"] / total_area if total_area > 0 else math.nan
+        entry["snr"] = entry["height"] / noise if noise > 0 else math.inf
+    # ---- diagnostics: is the fit as good as the noise allows, and are the parameters determined?
+    freedom = len(x) - len(params)
+    chi2_red = ss_res / freedom / noise ** 2 if freedom > 0 and noise > 0 else math.nan
+    centred = residual - np.mean(residual)
+    denominator = float(np.sum(centred ** 2))
+    autocorr = float(np.sum(centred[1:] * centred[:-1]) / denominator) if denominator > 0 else math.nan
+    max_correlation = math.nan
+    if errors_ok and len(params) > 1:
+        sigma_all = np.sqrt(np.clip(np.diag(covariance), 0, None))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            correlation = covariance / np.outer(sigma_all, sigma_all)
+        off_diagonal = np.abs(correlation[~np.eye(len(params), dtype=bool)])
+        off_diagonal = off_diagonal[np.isfinite(off_diagonal)]
+        max_correlation = float(np.max(off_diagonal)) if len(off_diagonal) else math.nan
+    warnings = []
+    if not errors_ok:
+        warnings.append("no_errors")
+    if math.isfinite(chi2_red) and chi2_red > CHI2_HIGH:
+        warnings.append("misfit")
+    if math.isfinite(autocorr) and autocorr > AUTOCORR_HIGH:
+        warnings.append("structured_residual")
+    if math.isfinite(max_correlation) and max_correlation > CORRELATION_HIGH:
+        warnings.append("correlated")
+    if any(c["at_limit"] for c in components):
+        warnings.append("at_limit")
+    if any(c["snr"] < SNR_LOW for c in components):
+        warnings.append("weak_component")
+    if any(math.isfinite(c["area_err"]) and c["area"] > 0 and c["area_err"] / c["area"] > RELATIVE_ERROR_HIGH for c in components):
+        warnings.append("uncertain_area")
+    if any(c["fwhm"] < 4 * step for c in components):
+        warnings.append("narrow_component")
     result.update(ok=True, fit=fit, background=background_curve(x, tail),
                   curves=[peak_shape(x, model, *peak) for peak in peaks], residual=residual,
                   r2=1.0 - ss_res / ss_tot if ss_tot > 0 else math.nan,
-                  rmse=math.sqrt(ss_res / len(x)), components=components)
+                  rmse=math.sqrt(ss_res / len(x)), components=components, noise=noise, chi2_red=chi2_red,
+                  autocorr=autocorr, max_correlation=max_correlation, warnings=warnings)
     return result
 
 

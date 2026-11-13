@@ -263,6 +263,31 @@ class MultiPeakFitTests(unittest.TestCase):
         descending = fit_multipeak(self.XC[::-1], y[::-1], [1340, 1600], max_shift=30)   # FT-IR files run high → low
         self.assertAlmostEqual(descending["components"][0]["center"], 1350, delta=0.5)
 
+    def test_diagnostics_separate_a_sound_fit_from_wrong_ones(self):
+        y = self.carbon()
+        good = fit_multipeak(self.XC, y, [1340, 1600], max_shift=30)
+        self.assertEqual(good["warnings"], [])
+        self.assertAlmostEqual(good["noise"], 1.0, delta=0.15)
+        self.assertAlmostEqual(good["chi2_red"], 1.0, delta=0.3)
+        self.assertLess(abs(good["autocorr"]), 0.2)
+        self.assertLess(good["max_correlation"], 0.9)
+        self.assertGreater(min(c["snr"] for c in good["components"]), 50)
+        # one component for two bands: the residual is large and wavy
+        missing = fit_multipeak(self.XC, y, [1350], max_shift=30)
+        self.assertIn("misfit", missing["warnings"])
+        self.assertIn("structured_residual", missing["warnings"])
+        self.assertGreater(missing["chi2_red"], 10)
+        # the wrong shape for the same bands
+        self.assertIn("structured_residual", fit_multipeak(self.XC, y, [1340, 1600], model="gaussian", max_shift=30)["warnings"])
+        # a third component where there is none: not above the noise, or traded off against its neighbour
+        extra = fit_multipeak(self.XC, y, [1340, 1480, 1600], max_shift=30)
+        self.assertTrue({"weak_component", "uncertain_area", "correlated", "at_limit"} & set(extra["warnings"]), extra["warnings"])
+        # a start too far from the band
+        self.assertIn("at_limit", fit_multipeak(self.XC, y, [1300, 1585], max_shift=5)["warnings"])
+        # two components on one band cannot be told apart
+        twins = fit_multipeak(self.XC, y, [1580, 1590], window=(1500, 1700), max_shift=20)
+        self.assertTrue({"correlated", "uncertain_area", "at_limit", "weak_component"} & set(twins["warnings"]), twins["warnings"])
+
     def test_centres_are_read_from_free_text(self):
         self.assertEqual(parse_centers("1350, 1580"), [1350.0, 1580.0])
         self.assertEqual(parse_centers("1350、1580；1620\n 2700 cm"), [1350.0, 1580.0, 1620.0, 2700.0])
