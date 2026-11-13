@@ -17,7 +17,8 @@ from project_io import (
 )
 from raman_io import (read_spectra, RamanParseError, SUPPORTED_EXTENSIONS, condition_summary, wdf_available,
                       spectrum_kind, native_y_units)
-from raman_processing import process, detect_peaks, fit_peak, to_absorbance, from_absorbance
+from raman_processing import (process, detect_peaks, fit_peak, fit_multipeak, parse_centers, to_absorbance,
+                              from_absorbance, MAX_FIT_PEAKS)
 from figure_style import (
     STYLE_DEFAULTS, STYLE_KEYS, FIGURE_PRESETS_MM, FONT_FAMILIES, METRIC_COMPATIBLE, mm_to_inches, inches_to_mm,
     font_rcparams, apply_mpl_style, export_figure, resolve_font, css_font_stack, validate_style_settings,
@@ -33,7 +34,7 @@ from plot_extras import (
     add_mpl_zoom_inset, add_plotly_zoom_inset, top_labels_height, UNIT_HTML,
 )
 
-APP_VERSION = "1.2"
+APP_VERSION = "1.3"
 LAST_UPDATED = "2026-11-13"
 LOCAL_MODE = os.environ.get("RAMAN_MAKER_LOCAL") == "1"
 # Named colours in the graph app's format; copy that app's colors.csv here to share its names.
@@ -983,6 +984,14 @@ with st.sidebar.expander(ui("前処理（スパイク除去・平滑化・ベー
                                value=_widget_default("baseline_p", 0.01, number=True), step=0.005, format="%.4f", key="baseline_p",
                                help=ui("小さいほどベースラインがピークの下に留まります。", "Smaller keeps the baseline under the peaks."))
         baseline_params.update(lam=float(10 ** _lam), p=float(_p))
+    st.markdown(ui("**処理の確認**", "**Check the processing**"))
+    show_raw = st.checkbox(ui("処理前のデータを薄く重ねる", "Overlay the data as measured (faint)"),
+                           value=_widget_default("show_raw", False, checkbox=True), key="show_raw",
+                           help=ui("スパイク除去・平滑化・ベースライン差し引きの前のデータを、処理後と同じ縮尺で薄い線で描きます。処理でピークの形や位置が変わっていないかを確かめられます。保存する図にも出ます。",
+                                   "Draws the data before spike removal, smoothing and baseline subtraction as a faint line on the scale of the processed spectrum, to check that the processing has not changed peak shapes or positions. It appears in the saved figure too."))
+    show_baseline = st.checkbox(ui("差し引いたベースラインを重ねる", "Overlay the subtracted baseline"),
+                                value=_widget_default("show_baseline", False, checkbox=True), key="show_baseline",
+                                help=ui("処理前のデータの下に、差し引いたベースラインを点線で描きます。", "Draws the subtracted baseline as a dotted line under the data as measured."))
 
 st.sidebar.subheader(T["tick_settings"])
 # Tick spacing follows the displayed range until the person sets it (a restored project keeps its own).
@@ -1210,6 +1219,39 @@ with st.sidebar.expander(ui("ピーク・注記・拡大図", "Peaks, marks and 
         format_func=lambda value: {"upper left": ui("左上", "Upper left"), "upper right": ui("右上", "Upper right"), "lower left": ui("左下", "Lower left"), "lower right": ui("右下", "Lower right")}[value], key="zoom_location")
     annotation_font_size = st.slider(ui("ピーク値・拡大図の文字サイズ", "Peak value and inset font size"), 4, 20, _widget_default("annotation_font_size", 6), key="annotation_font_size")
 
+with st.sidebar.expander(ui("ピーク分離フィット", "Fit overlapping peaks")):
+    st.caption(ui("指定した範囲を、指定した数のピークの和でフィットします。成分の数と初期位置は自分で決めます（自動では増やしません）。前処理後のデータに対して、表示中のすべてのスペクトルを同じ条件でフィットします。",
+                  "Fits the chosen range with the sum of the peaks you list. The number of components and their starting positions are yours (none is added automatically). All visible spectra are fitted on the processed data with the same settings."))
+    mfit_on = st.checkbox(ui("フィットする", "Fit"), value=_widget_default("mfit_on", False, checkbox=True), key="mfit_on")
+    _mr = st.session_state.get("mfit_range")
+    if not (isinstance(_mr, (list, tuple)) and len(_mr) == 2 and x_min <= _mr[0] < _mr[1] <= x_max):
+        st.session_state["mfit_range"] = (x_min, x_max)
+    mfit_range = st.slider(ui("フィットする範囲 (cm⁻¹)", "Fit range (cm⁻¹)"), x_min, x_max, step=1.0, key="mfit_range")
+    _widget_default("mfit_centers", "")
+    mfit_centers_text = st.text_input(ui("ピークの初期位置 (cm⁻¹)", "Starting positions (cm⁻¹)"), key="mfit_centers",
+                                      placeholder=ui("例: 1350, 1580", "e.g. 1350, 1580"),
+                                      help=ui(f"カンマか空白で区切ります（最大 {MAX_FIT_PEAKS} 本）。フィット範囲の外の値は使いません。",
+                                              f"Separate with commas or spaces (up to {MAX_FIT_PEAKS}). Values outside the fit range are not used."))
+    _mf1, _mf2 = st.columns(2)
+    _widget_default("mfit_model", "lorentzian")
+    mfit_model = _mf1.selectbox(ui("関数", "Model"), ["lorentzian", "gaussian", "pvoigt"], key="mfit_model",
+                                format_func=lambda v: {"lorentzian": ui("ローレンツ", "Lorentzian"), "gaussian": ui("ガウス", "Gaussian"),
+                                                       "pvoigt": ui("擬フォークト", "Pseudo-Voigt")}[v],
+                                help=ui("結晶のラマンバンドはローレンツ、ガラス・非晶質や装置幅が効く場合はガウス寄りです。擬フォークトは両者の混合比 η も合わせるので自由度が増えます。",
+                                        "Raman bands of crystals are close to Lorentzian; glasses, amorphous phases and instrument broadening are closer to Gaussian. The pseudo-Voigt also fits the mixing ratio η, which adds freedom."))
+    _widget_default("mfit_background", "linear")
+    mfit_background = _mf2.selectbox(ui("バックグラウンド", "Background"), ["none", "constant", "linear"], key="mfit_background",
+                                     format_func=lambda v: {"none": ui("なし", "None"), "constant": ui("定数", "Constant"),
+                                                            "linear": ui("直線", "Linear")}[v])
+    mfit_max_shift = st.number_input(ui("中心の動ける幅 ± (cm⁻¹)", "Allowed centre shift ± (cm⁻¹)"), 1.0, 500.0,
+                                     value=_widget_default("mfit_max_shift", 15.0, number=True), step=1.0, key="mfit_max_shift",
+                                     help=ui("各ピークの中心は初期位置からこの幅までしか動きません。上限に張り付いた成分は結果の表に印が付きます。",
+                                             "Each centre may move this far from its starting position. Components that end at a limit are flagged in the results."))
+    mfit_show_total = st.checkbox(ui("合計の曲線を図に描く", "Draw the summed curve"), value=_widget_default("mfit_show_total", True, checkbox=True), key="mfit_show_total")
+    mfit_show_components = st.checkbox(ui("各成分を図に描く", "Draw the components"), value=_widget_default("mfit_show_components", True, checkbox=True), key="mfit_show_components")
+    mfit_fill = st.checkbox(ui("成分を薄く塗る", "Shade the components"), value=_widget_default("mfit_fill", False, checkbox=True), key="mfit_fill")
+mfit_centers = [c for c in parse_centers(mfit_centers_text) if mfit_range[0] <= c <= mfit_range[1]][:MAX_FIT_PEAKS]
+
 st.sidebar.divider()
 
 
@@ -1356,7 +1398,7 @@ if active:
                 st.warning(ui(f"{active[i].name}: 前処理できませんでした（{exc}）。元のデータを表示します。",
                               f"{active[i].name}: processing failed ({exc}); showing the data as measured."))
                 mask = (spectrum.x >= x_min) & (spectrum.x <= x_max)
-                x, y, info = spectrum.x[mask], y_in[mask], {"spikes": 0, "baseline": None}
+                x, y, info = spectrum.x[mask], y_in[mask], {"spikes": 0, "baseline": None, "raw": y_in[mask]}
             info["signal"] = y
             if PEAKS_DOWN:
                 y = from_absorbance(y, "transmittance_percent")
@@ -1385,13 +1427,67 @@ if active:
                 y_plot = y * scales[i] + abs_offsets[i]
                 level = abs_offsets[i]
                 label_y = level + y_min * scales[i] + label_offset_y * (y_max - y_min) * scales[i]
+            # lift: processed value → plotted value (the stacking offset, or the manual scale and position)
+            lift = (1.0, level) if stack else (scales[i], abs_offsets[i])
             rows.append(dict(index=i, x=x, y=y, y_plot=y_plot, level=level, label_y=label_y, signal=info["signal"],
-                             color=colors_sel[i], label=labels[i], spikes=info["spikes"]))
+                             color=colors_sel[i], label=labels[i], spikes=info["spikes"], lift=lift,
+                             raw=info.get("raw"), baseline=info.get("baseline"),
+                             norm=(info.get("scale", 1.0), info.get("shift", 0.0))))
         return rows
 
     curves = arranged()
     _spikes_removed = sum(r["spikes"] for r in curves)
     axes_width_points = fig_width * 72 * (plot_style["margin_right"] - plot_style["margin_left"])
+
+    # Overlays live on the processed (absorbance) scale, so a transmittance display draws none.
+    OVERLAYS = not PEAKS_DOWN
+
+    def overlay_curves(row):
+        """(kind, x, plotted y) of the data as measured and of the subtracted baseline, on the scale of
+        the processed spectrum: both go through the normalisation and the row's offset."""
+        out = []
+        if not OVERLAYS or row["raw"] is None or len(row["raw"]) != len(row["x"]):
+            return out
+        scale, shift = row["norm"]
+        a, b = row["lift"]
+        if show_raw:
+            out.append(("raw", row["x"], a * (scale * row["raw"] + shift) + b))
+        if show_baseline and row["baseline"] is not None:
+            out.append(("baseline", row["x"], a * (scale * row["baseline"] + shift) + b))
+        return out
+
+    _fits: dict = {}
+
+    def fit_of(row):
+        """The multi-peak fit of a spectrum's processed signal (None when fitting is off or has no centres)."""
+        if not (mfit_on and mfit_centers):
+            return None
+        if row["index"] not in _fits:
+            _fits[row["index"]] = fit_multipeak(row["x"], row["signal"], mfit_centers, window=mfit_range, model=mfit_model,
+                                                background=mfit_background, max_shift=mfit_max_shift)
+        return _fits[row["index"]]
+
+    def fit_curves(row):
+        """(kind, x, plotted y[, plotted background]) for the summed curve and the components; each
+        component is drawn on the fitted background so that it sits on the data."""
+        result = fit_of(row)
+        if not OVERLAYS or result is None or not result["ok"]:
+            return []
+        a, b = row["lift"]
+        out = []
+        base = a * result["background"] + b
+        if mfit_show_components:
+            out += [("component", result["x"], a * (curve + result["background"]) + b, base) for curve in result["curves"]]
+        if mfit_show_total:
+            out.append(("total", result["x"], a * result["fit"] + b, base))
+        return out
+
+    FIT_TOTAL_COLOR = "#222222"
+
+    def _rgba(color, alpha):
+        from matplotlib.colors import to_rgb
+        r, g, b = (int(round(255 * v)) for v in to_rgb(color))
+        return f"rgba({r},{g},{b},{alpha})"
 
     def peak_indices(row):
         """Peaks of the processed signal (absorption bands point up in absorbance, so transmittance
@@ -1466,6 +1562,16 @@ if active:
             legend_levels.append(row["level"])
             prepared_curves.append(PreparedCurve(rich(row["label"]), row["x"], row["y_plot"], row["color"], plot_style["line_width"]))
             side_labels.append((row["label_y"], row["color"], row["label"]))
+            for kind, ox, oy in overlay_curves(row):
+                ax.plot(ox, oy, color=row["color"], linewidth=plot_style["line_width"] * 0.7, alpha=0.4 if kind == "raw" else 0.8,
+                        linestyle="-" if kind == "raw" else ":", zorder=line.get_zorder() - 0.5)
+            for kind, fx, fy, fbase in fit_curves(row):
+                if kind == "component":
+                    if mfit_fill:
+                        ax.fill_between(fx, fbase, fy, color=row["color"], alpha=0.15, linewidth=0)
+                    ax.plot(fx, fy, color=row["color"], linewidth=plot_style["line_width"] * 0.7, linestyle="--")
+                else:
+                    ax.plot(fx, fy, color=FIT_TOTAL_COLOR, linewidth=plot_style["line_width"] * 0.7, linestyle="-")
             for k in peak_indices(row):
                 ax.annotate(f"{row['x'][k]:.{int(peak_decimals)}f}", xy=(row["x"][k], row["y_plot"][k]),
                             xytext=(0, -3 if PEAKS_DOWN else 3), textcoords="offset points", ha="center",
@@ -1520,6 +1626,27 @@ if active:
             legend_traces.append(len(pfig.data) - 1)
             legend_levels.append(row["level"])
             prepared_curves.append(PreparedCurve(name, row["x"], row["y_plot"], row["color"], plot_style["line_width"] * pv))
+            for kind, ox, oy in overlay_curves(row):
+                pfig.add_trace(go.Scatter(
+                    x=ox, y=oy, mode="lines", showlegend=False, opacity=0.4 if kind == "raw" else 0.8,
+                    line=dict(color=row["color"], width=plot_style["line_width"] * pt * 0.7, dash="solid" if kind == "raw" else "dot"),
+                    hovertemplate=(ui("処理前", "As measured") if kind == "raw" else ui("ベースライン", "Baseline")) + "<br>%{x:.1f} " + UNIT_HTML + "<extra></extra>"))
+            _component_number = 0
+            for kind, fx, fy, fbase in fit_curves(row):
+                if kind == "component":
+                    _component_number += 1
+                    if mfit_fill:
+                        pfig.add_trace(go.Scatter(x=fx, y=fbase, mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip"))
+                    pfig.add_trace(go.Scatter(
+                        x=fx, y=fy, mode="lines", showlegend=False, fill="tonexty" if mfit_fill else None,
+                        fillcolor=_rgba(row["color"], 0.15) if mfit_fill else None,
+                        line=dict(color=row["color"], width=plot_style["line_width"] * pt * 0.7, dash="dash"),
+                        hovertemplate=ui(f"成分 {_component_number}", f"Component {_component_number}") + "<br>%{x:.1f} " + UNIT_HTML + "<extra></extra>"))
+                else:
+                    pfig.add_trace(go.Scatter(
+                        x=fx, y=fy, mode="lines", showlegend=False,
+                        line=dict(color=FIT_TOTAL_COLOR, width=plot_style["line_width"] * pt * 0.7),
+                        hovertemplate=ui("フィットの合計", "Fitted sum") + "<br>%{x:.1f} " + UNIT_HTML + "<extra></extra>"))
             for k in peak_indices(row):
                 pfig.add_annotation(x=float(row["x"][k]), y=float(row["y_plot"][k]), text=f"{row['x'][k]:.{int(peak_decimals)}f}",
                                     showarrow=False, textangle=-90 if peak_label_rotate else 0, xanchor="center",
@@ -1613,6 +1740,73 @@ if active:
                                   "Positions are local maxima after the range and processing. With fitting on, the fitted centre and FWHM are listed too."))
                 else:
                     st.caption(ui("検出されたピークはありません。感度を下げてみてください。", "No peaks were detected; try a lower sensitivity."))
+        if mfit_on:
+            with st.expander(ui("ピーク分離フィットの結果", "Results of the peak fit"), expanded=True):
+                if not mfit_centers:
+                    st.info(ui("サイドバーの「ピーク分離フィット」に、ピークの初期位置（フィット範囲の中）を入力してください。",
+                               "Enter the starting positions (inside the fit range) under “Fit overlapping peaks” in the sidebar."))
+                else:
+                    _reasons = {"too_few_points": ui("範囲内の点が足りません", "too few points in the range"),
+                                "center_outside": ui("初期位置がデータの範囲外です", "a starting position lies outside the data"),
+                                "flat": ui("範囲内のデータが平坦です", "the data are flat in the range")}
+                    fit_rows, curve_frames, residual_fig = [], [], go.Figure()
+                    for row in curves:
+                        result = fit_of(row)
+                        name = plain(row["label"])
+                        if not result["ok"]:
+                            _why = result["message"]
+                            st.warning(f"{name}: " + ui("フィットできませんでした（", "the fit failed (")
+                                       + _reasons.get(_why, ui("収束しませんでした", "no convergence")) + ui("）。", ")."))
+                            continue
+                        first = result["components"][0]
+                        for number, c in enumerate(result["components"], start=1):
+                            fit_rows.append({
+                                ui("スペクトル", "Spectrum"): name, ui("成分", "Component"): number,
+                                ui("中心 (cm⁻¹)", "Centre (cm⁻¹)"): round(c["center"], 2), ui("± 中心", "± centre"): round(c["center_err"], 2),
+                                ui("半値幅 (cm⁻¹)", "FWHM (cm⁻¹)"): round(c["fwhm"], 2), ui("± 半値幅", "± FWHM"): round(c["fwhm_err"], 2),
+                                ui("高さ", "Height"): c["height"], ui("± 高さ", "± height"): c["height_err"],
+                                ui("面積", "Area"): c["area"], ui("± 面積", "± area"): c["area_err"],
+                                ui("面積の割合 (%)", "Area share (%)"): round(100 * c["share"], 1),
+                                ui("面積比（対 成分1）", "Area ratio (to no. 1)"): c["area"] / first["area"] if first["area"] > 0 else None,
+                                ui("高さ比（対 成分1）", "Height ratio (to no. 1)"): c["height"] / first["height"] if first["height"] > 0 else None,
+                                **({"η": round(c["eta"], 3)} if mfit_model == "pvoigt" else {}),
+                                "R²": round(result["r2"], 5), "RMSE": result["rmse"],
+                                ui("上限・下限に到達", "At a limit"): "⚠" if c["at_limit"] else "",
+                            })
+                        frame = {ui("スペクトル", "Spectrum"): name, X_VALUE_NAME: result["x"], ui("データ", "Data"): result["y"],
+                                 ui("フィットの合計", "Fitted sum"): result["fit"], ui("バックグラウンド", "Background"): result["background"],
+                                 ui("残差", "Residual"): result["residual"]}
+                        for number, curve in enumerate(result["curves"], start=1):
+                            frame[ui(f"成分 {number}", f"Component {number}")] = curve
+                        curve_frames.append(pd.DataFrame(frame))
+                        residual_fig.add_trace(go.Scatter(x=result["x"], y=result["residual"], mode="lines", name=name,
+                                                          line=dict(color=row["color"], width=1.2)))
+                    if fit_rows:
+                        fit_table = pd.DataFrame(fit_rows)
+                        st.dataframe(fit_table, hide_index=True)
+                        if any(r[ui("上限・下限に到達", "At a limit")] for r in fit_rows):
+                            st.warning(ui("⚠ の成分は、中心が動ける幅の端か、幅の上限・下限に張り付いています。初期位置・成分の数・範囲を見直してください。",
+                                          "Components marked ⚠ ended at the edge of the allowed centre shift or at a width limit. Review the starting positions, the number of components or the range."))
+                        residual_fig.add_hline(y=0, line=dict(color="black", width=0.8))
+                        residual_fig.update_layout(height=220, margin=dict(l=60, r=20, t=30, b=40), plot_bgcolor="white", paper_bgcolor="white",
+                                                   title=dict(text=ui("残差（データ − フィット）", "Residual (data − fit)"), font=dict(size=13, color="black")),
+                                                   showlegend=len(residual_fig.data) > 1, font=dict(color="black"))
+                        residual_fig.update_xaxes(range=[mfit_range[1], mfit_range[0]] if x_reverse else list(mfit_range), showline=True,
+                                                  linecolor="black", showgrid=False, zeroline=False, ticks="outside")
+                        residual_fig.update_yaxes(showline=True, linecolor="black", showgrid=False, zeroline=False, ticks="outside")
+                        st.plotly_chart(residual_fig, config={"displaylogo": False}, **WIDE_CHART)
+                        _d1, _d2 = st.columns(2)
+                        _d1.download_button(ui("📥 フィット結果を CSV で保存", "📥 Save the fit results as CSV"),
+                            data=fit_table.to_csv(index=False).encode("utf-8-sig"), file_name=f"{FILE_STEM}_fit.csv", mime="text/csv", **WIDE_DOWNLOAD)
+                        _d2.download_button(ui("📥 フィット曲線を CSV で保存", "📥 Save the fitted curves as CSV"),
+                            data=pd.concat(curve_frames, ignore_index=True).to_csv(index=False).encode("utf-8-sig"),
+                            file_name=f"{FILE_STEM}_fit_curves.csv", mime="text/csv", **WIDE_DOWNLOAD)
+                        st.caption(ui("前処理後のデータ" + ("（吸光度）" if IS_FTIR else "") + "に対する最小二乗フィットです。± は共分散行列から求めた標準誤差で、点ごとの雑音が独立であることを仮定しています。"
+                                      "残差に波打ちが残る場合は、成分の数か関数が合っていません。面積・高さは正規化とベースラインの設定に依存するので、比で比べてください。"
+                                      + ("　透過率の表示では曲線は図に重ねません（吸光度の表示で確認できます）。" if PEAKS_DOWN else ""),
+                                      "A least-squares fit of the processed data" + (" (absorbance)" if IS_FTIR else "") + ". ± is the standard error from the covariance matrix and assumes independent noise at each point. "
+                                      "Waves left in the residual mean that the number of components or the model does not match. Areas and heights depend on the normalisation and the baseline, so compare ratios."
+                                      + (" The curves are not drawn on a transmittance display (see them in absorbance)." if PEAKS_DOWN else "")))
         with st.expander(ui("処理後のデータ", "Processed data"), expanded=False):
             frames = [pd.DataFrame({ui("スペクトル", "Spectrum"): plain(row["label"]), X_VALUE_NAME: row["x"],
                                     Y_VALUE_NAME + ui("（処理後）", " (processed)"): row["y"],

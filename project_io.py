@@ -27,7 +27,10 @@ GLOBAL_KEYS = (
     "show_yticks", "major_tick", "show_minor", "minor_tick", "x_label", "y_label",
     # processing
     "spike_remove", "spike_threshold", "smooth_on", "smooth_window", "smooth_order",
-    "baseline_method", "baseline_order", "baseline_lam", "baseline_p", "multi_mode",
+    "baseline_method", "baseline_order", "baseline_lam", "baseline_p", "multi_mode", "show_raw", "show_baseline",
+    # fit of overlapping peaks
+    "mfit_on", "mfit_range", "mfit_centers", "mfit_model", "mfit_background", "mfit_max_shift",
+    "mfit_show_total", "mfit_show_components", "mfit_fill",
     # peaks, marks, bands, inset
     "show_peaks", "peak_prom", "peak_distance", "peak_decimals", "peak_label_rotate", "peak_fit",
     "peak_model", "peak_half_window", "marks_text", "marks_style", "marks_color", "marks_label_mode",
@@ -44,12 +47,14 @@ GLOBAL_KEYS = (
 PATTERN_KEY = re.compile(r"(?:vis|ord|_val_lbl|sp_color|extra_offset|yoff|scale|yunit)_\d+$")
 BOOL_KEYS = {"x_reverse", "stack", "show_legend", "show_yticks", "show_minor", "spike_remove", "smooth_on", "show_peaks",
              "peak_label_rotate", "peak_fit", "marks_show_value", "bands_label", "show_zoom", "show_side_labels",
-             "show_panel", "palette_reverse"}
+             "show_panel", "palette_reverse", "show_raw", "show_baseline", "mfit_on", "mfit_show_total",
+             "mfit_show_components", "mfit_fill"}
 BOUNDS = {
     "global_offset": (0., 3.), "major_tick": (1., 2000.), "minor_tick": (0.5, 1000.),
     "spike_threshold": (1., 50.), "smooth_window": (3, 101), "smooth_order": (1, 5),
     "baseline_order": (0, 12), "baseline_lam": (1., 10.), "baseline_p": (0.0001, 0.5),
     "peak_prom": (.005, .9), "peak_distance": (1., 500.), "peak_decimals": (0, 3), "peak_half_window": (2., 200.),
+    "mfit_max_shift": (1., 500.),
     "marks_decimals": (0, 3), "marks_fontsize": (4, 20), "bands_alpha": (0., 1.), "annotation_font_size": (4, 20),
     "label_fontsize": (4, 28), "label_offset_x": (-500., 500.), "label_offset_y": (-1., 2.),
     "fig_width": (25 / 25.4, 20.), "fig_height": (25 / 25.4, 20.),
@@ -66,6 +71,8 @@ CHOICES = {
     "baseline_method": ("none", "offset", "linear", "poly", "als"),
     "multi_mode": ("mean", "all", "first"),
     "peak_model": ("lorentzian", "gaussian"),
+    "mfit_model": ("lorentzian", "gaussian", "pvoigt"),
+    "mfit_background": ("none", "constant", "linear"),
     "marks_style": ("dashed", "dotted", "solid", "none"),
     "marks_label_mode": ("top", "rotated", "none"),
     "zoom_location": ("upper left", "upper right", "lower left", "lower right"),
@@ -110,13 +117,13 @@ def clean_settings(settings: dict) -> dict:
             valid = _number(value) and lower <= value <= upper
             if key in INT_KEYS:
                 valid = valid and isinstance(value, int)
-        elif key in ("xrange", "zoom_range", "norm_window"):
+        elif key in ("xrange", "zoom_range", "norm_window", "mfit_range"):
             valid = _pair(value, *X_LIMITS)
             if valid:
                 value = tuple(float(v) for v in value)
         elif key in CHOICES:
             valid = value in CHOICES[key]
-        elif key in ("x_label", "y_label"):
+        elif key in ("x_label", "y_label", "mfit_centers"):
             valid = isinstance(value, str) and len(value) <= MAX_AXIS_LABEL
         elif key == "marks_text":
             valid = isinstance(value, str) and len(value) <= MAX_MARKS_TEXT

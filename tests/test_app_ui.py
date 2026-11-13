@@ -178,6 +178,85 @@ class PasteTests(unittest.TestCase):
         self.assertEqual(merge(merged, {"b.txt"}, []), {"restored.txt": b"r", "貼り付け 1.txt": b"p"}, "an emptied uploader")
 
 
+class FitTests(unittest.TestCase):
+    """The fit of overlapping peaks and the overlays that keep the processing checkable."""
+    FIT = {"xrange": (700.0, 1000.0), "mfit_on": True, "mfit_range": (880.0, 1000.0), "mfit_centers": "925, 955",
+           "mfit_max_shift": 15.0}
+
+    def test_two_components_are_fitted_drawn_and_kept_in_the_project(self):
+        plain = harness.report(harness.run_app(harness.data_files("jasco_5SiC_950C.txt"), {"xrange": (700.0, 1000.0)}))
+        at = harness.run_app(harness.data_files("jasco_5SiC_950C.txt"), dict(self.FIT))
+        r = harness.report(at)
+        fit = r["fits"][0]
+        self.assertTrue(fit["ok"], fit["message"])
+        self.assertEqual(len(fit["components"]), 2)
+        self.assertGreater(fit["r2"], 0.9)
+        for (center, fwhm, height, area, share, center_err, at_limit), start in zip(fit["components"], (925, 955)):
+            self.assertLess(abs(center - start), 15)
+            self.assertTrue(fwhm > 0 and height > 0 and area > 0 and 0 < share < 1 and center_err > 0)
+        # the figure: the spectrum, two dashed components in its colour, the dark sum; the legend is unchanged
+        self.assertEqual(len(r["mpl_lines"]), len(plain["mpl_lines"]) + 3)
+        dashed = [s for s in r["mpl_styles"] if s[0] == "--"]
+        self.assertEqual([s[1] for s in dashed], [r["colors"][0]] * 2)
+        self.assertIn("#222222", [s[1] for s in r["mpl_styles"]])
+        self.assertEqual(r["mpl_legend"], plain["mpl_legend"])
+        self.assertEqual(len(r["preview_all"]), len(plain["preview_all"]) + 3)
+        self.assertEqual(sum(1 for t in r["preview_all"] if t[0] == "dash"), 2)
+        table = at.dataframe[0].value
+        self.assertEqual(len(table), 2)
+        self.assertIn("面積比（対 成分1）", table.columns)
+        self.assertAlmostEqual(table["面積の割合 (%)"].sum(), 100.0, delta=0.2)
+        # switches: no components, shaded components
+        r = harness.report(harness.rerun(at, {"mfit_show_components": False}))
+        self.assertEqual(len(r["mpl_lines"]), len(plain["mpl_lines"]) + 1)
+        r = harness.report(harness.rerun(at, {"mfit_show_components": True, "mfit_fill": True}))
+        self.assertEqual(r["mpl_fills"], plain["mpl_fills"] + 2)
+        self.assertEqual(sum(1 for t in r["preview_all"] if t[3] == "tonexty"), 2)
+        # the project restores the fit
+        project = decode_project(r["project"])
+        self.assertEqual(project["settings"]["mfit_centers"], "925, 955")
+        again = harness.report(harness.run_app(project["spectrum_files"], project["settings"]))
+        self.assertEqual(again["fits"], r["fits"])
+
+    def test_missing_or_outside_centres_and_failures_are_explained(self):
+        at = harness.run_app(harness.data_files("jasco_5SiC_950C.txt"), {**self.FIT, "mfit_centers": ""})
+        r = harness.report(at)
+        self.assertEqual(r["fits"], [None])
+        self.assertTrue(any("初期位置" in i.value for i in at.info))
+        r = harness.report(harness.rerun(at, {"mfit_centers": "300, 925"}))       # 300 lies outside the fit range
+        self.assertEqual(len(r["fits"][0]["components"]), 1)
+        r = harness.report(harness.rerun(at, {"mfit_centers": "925", "mfit_range": (924.0, 926.0)}))
+        self.assertFalse(r["fits"][0]["ok"])
+        self.assertTrue(any("フィットできませんでした" in w.value for w in at.warning))
+
+    def test_measured_data_and_baseline_overlays(self):
+        files = harness.data_files("jasco_5SiC_950C.txt")
+        plain = harness.report(harness.run_app(files, {"baseline_method": "als"}))
+        r = harness.report(harness.run_app(files, {"baseline_method": "als", "show_raw": True, "show_baseline": True}))
+        self.assertEqual(len(r["mpl_lines"]), len(plain["mpl_lines"]) + 2)
+        faint, dotted = r["mpl_styles"][-2:]
+        self.assertEqual((faint[0], faint[2]), ("-", 0.4))
+        self.assertEqual(dotted[0], ":")
+        self.assertEqual(r["curves"], plain["curves"], "the spectrum itself is not touched")
+        self.assertEqual(r["mpl_legend"], plain["mpl_legend"])
+        self.assertEqual(sum(1 for t in r["preview_all"] if t[0] == "dot"), 1)
+        # without a baseline only the measured data are overlaid
+        r = harness.report(harness.run_app(files, {"show_raw": True, "show_baseline": True}))
+        self.assertEqual(len(r["mpl_lines"]), len(plain["mpl_lines"]) + 1)
+
+    def test_ftir_fits_in_absorbance_and_draws_nothing_on_transmittance(self):
+        files = harness.data_files("ftir_abs.txt")
+        state = {"mfit_on": True, "mfit_range": (800.0, 1300.0), "mfit_centers": "1080", "mfit_model": "gaussian",
+                 "mfit_max_shift": 40.0, "show_raw": True}
+        absorbance = harness.report(harness.run_app(files, dict(state)))
+        self.assertTrue(absorbance["fits"][0]["ok"])
+        self.assertGreater(len(absorbance["mpl_lines"]), 1)
+        transmittance = harness.report(harness.run_app(files, {**state, "ir_display": "transmittance"}))
+        self.assertEqual(len(transmittance["mpl_lines"]), 1)
+        self.assertEqual(transmittance["fits"][0]["components"], absorbance["fits"][0]["components"],
+                         "the fit is of the absorbance whichever display is chosen")
+
+
 class ArrangementTests(unittest.TestCase):
     def test_order_visibility_offsets_and_absolute_mode(self):
         at = harness.run_app(harness.data_files(*THREE), {"ord_0": 3, "ord_1": 1, "ord_2": 2, "vis_1": False,

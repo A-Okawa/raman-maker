@@ -316,18 +316,191 @@ def peak_table(x, y, indices, fit: bool = False, half_window: float = 15.0, mode
     return rows
 
 
+# ------------------------------------------------------------------ fits of overlapping peaks
+PEAK_SHAPES = ("lorentzian", "gaussian", "pvoigt")
+FIT_BACKGROUNDS = ("none", "constant", "linear")
+_GAUSS_AREA = math.sqrt(math.pi / (4 * math.log(2)))      # area of a unit-height Gaussian per unit FWHM
+_LORENTZ_AREA = math.pi / 2                                # the same for a Lorentzian
+MAX_FIT_PEAKS = 12
+
+
+def peak_shape(x, model: str, height: float, center: float, fwhm: float, eta: float = 0.5):
+    """One peak of ``height`` and full width at half maximum ``fwhm``; 'pvoigt' is the pseudo-Voigt
+    eta·Lorentzian + (1 − eta)·Gaussian with a common FWHM."""
+    x = _array(x)
+    u = (x - center) / max(float(fwhm), 1e-12)
+    lorentz = 1.0 / (1.0 + 4.0 * u ** 2)
+    gauss = np.exp(-4.0 * math.log(2) * u ** 2)
+    if model == "lorentzian":
+        return height * lorentz
+    if model == "gaussian":
+        return height * gauss
+    if model == "pvoigt":
+        return height * (eta * lorentz + (1.0 - eta) * gauss)
+    raise ValueError(f"Unknown peak model: {model}")
+
+
+def _area_factor(model: str, eta: float) -> float:
+    if model == "lorentzian":
+        return _LORENTZ_AREA
+    if model == "gaussian":
+        return _GAUSS_AREA
+    return eta * _LORENTZ_AREA + (1.0 - eta) * _GAUSS_AREA
+
+
+def fit_multipeak(x, y, centers, window=None, model: str = "lorentzian", background: str = "linear",
+                  max_shift: float = 15.0) -> dict:
+    """Fit the sum of len(centers) peaks (one shape for all) plus a background within ``window``.
+
+    The number of components and their starting positions are the caller's: nothing is added or
+    dropped automatically. Each centre may move by at most ±max_shift from its start; heights are
+    non-negative; widths lie between two data steps and the window width.
+
+    Returns a dict with ``ok``, ``message`` (why not, when not ok), ``x`` (the fitted points),
+    ``y``, ``fit`` (total), ``background`` (curve), ``curves`` (one per component, without the
+    background), ``residual``, ``r2``, ``rmse`` and ``components``: dicts with center, fwhm, height,
+    area, eta, their standard errors (``*_err``, from the covariance of the fit) and ``share``
+    (fraction of the summed area).
+    """
+    x, y = _array(x), _array(y)
+    if model not in PEAK_SHAPES:
+        raise ValueError(f"Unknown peak model: {model}")
+    if background not in FIT_BACKGROUNDS:
+        raise ValueError(f"Unknown background: {background}")
+    order = np.argsort(x)
+    x, y = x[order], y[order]
+    if window is not None:
+        low, high = sorted((float(window[0]), float(window[1])))
+        inside = (x >= low) & (x <= high)
+        x, y = x[inside], y[inside]
+    centers = [float(c) for c in centers]
+    result = {"ok": False, "message": "", "model": model, "background_kind": background, "x": x, "y": y,
+              "fit": None, "background": None, "curves": [], "residual": None, "r2": math.nan, "rmse": math.nan,
+              "components": []}
+    n = len(centers)
+    per_peak = 4 if model == "pvoigt" else 3
+    n_background = FIT_BACKGROUNDS.index(background)
+    if n == 0:
+        result["message"] = "no_centers"
+        return result
+    if n > MAX_FIT_PEAKS:
+        result["message"] = "too_many"
+        return result
+    if len(x) < per_peak * n + n_background + 2:
+        result["message"] = "too_few_points"
+        return result
+    if any(not (x[0] <= c <= x[-1]) for c in centers):
+        result["message"] = "center_outside"
+        return result
+    step = float(np.median(np.diff(x))) if len(x) > 1 else 1.0
+    span_x = float(x[-1] - x[0])
+    span_y = float(np.ptp(y))
+    if span_y <= 0 or span_x <= 0:
+        result["message"] = "flat"
+        return result
+    x_mid = float(np.mean(x))
+    floor = float(np.min(y))
+    shift = max(float(max_shift), step)
+    width0 = min(max(span_x / (4.0 * n), 4 * step), span_x / 2)
+    p0, lower, upper = [], [], []
+    for c in centers:
+        height0 = max(float(np.interp(c, x, y)) - (floor if background != "none" else 0.0), 0.05 * span_y)
+        p0 += [height0, c, width0] + ([0.5] if model == "pvoigt" else [])
+        lower += [0.0, max(c - shift, float(x[0])), 2 * step] + ([0.0] if model == "pvoigt" else [])
+        upper += [np.inf, min(c + shift, float(x[-1])), span_x] + ([1.0] if model == "pvoigt" else [])
+    if n_background >= 1:
+        p0.append(floor); lower.append(-np.inf); upper.append(np.inf)
+    if n_background == 2:
+        p0.append(0.0); lower.append(-np.inf); upper.append(np.inf)
+
+    def split(params):
+        peaks = [params[k * per_peak:(k + 1) * per_peak] for k in range(n)]
+        return peaks, params[n * per_peak:]
+
+    def background_curve(xs, tail):
+        curve = np.zeros(len(xs))
+        if len(tail) >= 1:
+            curve = curve + tail[0]
+        if len(tail) == 2:
+            curve = curve + tail[1] * (xs - x_mid)
+        return curve
+
+    def total(xs, *params):
+        peaks, tail = split(params)
+        out = background_curve(xs, tail)
+        for peak in peaks:
+            out = out + peak_shape(xs, model, *peak)
+        return out
+
+    try:
+        params, covariance = curve_fit(total, x, y, p0=p0, bounds=(lower, upper), maxfev=20000)
+    except (RuntimeError, ValueError) as exc:
+        result["message"] = f"no_convergence: {exc}"
+        return result
+    peaks, tail = split(params)
+    fit = total(x, *params)
+    residual = y - fit
+    ss_res = float(np.sum(residual ** 2))
+    ss_tot = float(np.sum((y - np.mean(y)) ** 2))
+    errors_ok = np.all(np.isfinite(covariance))
+    components = []
+    for k, peak in enumerate(peaks):
+        height, center, fwhm = (float(v) for v in peak[:3])
+        eta = float(peak[3]) if model == "pvoigt" else (1.0 if model == "lorentzian" else 0.0)
+        factor = _area_factor(model, eta)
+        area = factor * height * fwhm
+        entry = {"center": center, "fwhm": fwhm, "height": height, "area": area, "eta": eta,
+                 "center_err": math.nan, "fwhm_err": math.nan, "height_err": math.nan, "area_err": math.nan,
+                 "eta_err": math.nan, "start": centers[k],
+                 "at_limit": bool(abs(center - centers[k]) >= 0.98 * shift or fwhm >= 0.98 * span_x or fwhm <= 2.05 * step)}
+        if errors_ok:
+            i0 = k * per_peak
+            block = covariance[i0:i0 + per_peak, i0:i0 + per_peak]
+            sigma = np.sqrt(np.clip(np.diag(block), 0, None))
+            entry.update(height_err=float(sigma[0]), center_err=float(sigma[1]), fwhm_err=float(sigma[2]))
+            gradient = [factor * fwhm, 0.0, factor * height]
+            if model == "pvoigt":
+                entry["eta_err"] = float(sigma[3])
+                gradient.append((_LORENTZ_AREA - _GAUSS_AREA) * height * fwhm)
+            gradient = np.asarray(gradient)
+            entry["area_err"] = float(math.sqrt(max(float(gradient @ block @ gradient), 0.0)))
+        components.append(entry)
+    total_area = sum(c["area"] for c in components)
+    for entry in components:
+        entry["share"] = entry["area"] / total_area if total_area > 0 else math.nan
+    result.update(ok=True, fit=fit, background=background_curve(x, tail),
+                  curves=[peak_shape(x, model, *peak) for peak in peaks], residual=residual,
+                  r2=1.0 - ss_res / ss_tot if ss_tot > 0 else math.nan,
+                  rmse=math.sqrt(ss_res / len(x)), components=components)
+    return result
+
+
+def parse_centers(text: str) -> list[float]:
+    """Numbers separated by commas, spaces, semicolons or line breaks; anything else is skipped."""
+    values = []
+    for token in str(text or "").replace("、", ",").replace("，", ",").replace("；", ",").replace(";", ",").replace(",", " ").split():
+        try:
+            value = float(token)
+        except ValueError:
+            continue
+        if math.isfinite(value):
+            values.append(value)
+    return values
+
+
 def process(x, y, *, x_range=None, spikes: float | None = None, smooth_window: int = 0,
             smooth_order: int = 2, baseline_method: str = "none", baseline_params: dict | None = None,
             normalize_mode: str = "none", normalize_window=None):
     """The whole chain in the app's order: crop → spikes → smoothing → baseline → normalisation.
 
-    Returns (x, y, info) where info reports the number of replaced spikes and the subtracted
-    baseline (on the cropped x), so the app can show them.
+    Returns (x, y, info) where info reports the number of replaced spikes, the subtracted
+    baseline and the cropped data as measured (``raw``), both on the cropped x, and the
+    normalisation as ``scale`` and ``shift``, so the app can show them.
     """
     x, y = _array(x), _array(y)
     if x_range is not None:
         x, y = crop(x, y, *x_range)
-    info = {"spikes": 0, "baseline": None}
+    info = {"spikes": 0, "baseline": None, "raw": y.copy(), "scale": 1.0, "shift": 0.0}
     if len(y) == 0:
         return x, y, info
     if spikes:
@@ -339,5 +512,11 @@ def process(x, y, *, x_range=None, spikes: float | None = None, smooth_window: i
         info["baseline"] = base
         y = y - base
     if normalize_mode != "none":
+        before = y
         y = normalize(y, normalize_mode, x, normalize_window)
+        # Normalisation is y → scale·y + shift; the app uses the pair to draw the measured data and
+        # the subtracted baseline on the scale of the processed spectrum.
+        if np.ptp(before) > 0:
+            info["scale"] = float(np.ptp(y) / np.ptp(before))
+            info["shift"] = float(np.mean(y) - info["scale"] * np.mean(before))
     return x, y, info

@@ -1,5 +1,6 @@
 """Processing: each step on synthetic spectra with known answers."""
 from pathlib import Path
+import math
 import sys
 import unittest
 
@@ -7,7 +8,8 @@ import numpy as np
 
 APP_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP_DIR))
-from raman_processing import (baseline, baseline_als, baseline_linear, baseline_modpoly, crop, detect_peaks, fit_peak,
+from raman_processing import (fit_multipeak, parse_centers, peak_shape, process as run_process,
+                              baseline, baseline_als, baseline_linear, baseline_modpoly, crop, detect_peaks, fit_peak,
                               from_absorbance, normalize, peak_table, process, remove_spikes, smooth, to_absorbance)
 
 X = np.arange(200.0, 1000.001, 0.5)
@@ -198,6 +200,81 @@ class ChainTests(unittest.TestCase):
     def test_empty_range(self):
         x, out, info = process(X, X, x_range=(5000, 6000), baseline_method="als", normalize_mode="max")
         self.assertEqual(len(out), 0)
+
+
+class MultiPeakFitTests(unittest.TestCase):
+    """Overlapping peaks: the D and G bands of carbon as two Lorentzians on a sloping background."""
+    XC = np.arange(1000.0, 1900.0, 1.0)
+
+    def carbon(self, noise=1.0):
+        rng = np.random.default_rng(3)
+        return (peak_shape(self.XC, "lorentzian", 100, 1350, 120) + peak_shape(self.XC, "lorentzian", 80, 1585, 70)
+                + 5 + 0.01 * (self.XC - 1450) + rng.normal(0, noise, len(self.XC)))
+
+    def test_two_overlapping_lorentzians_are_recovered_with_errors(self):
+        result = fit_multipeak(self.XC, self.carbon(), [1340, 1600], model="lorentzian", max_shift=30)
+        self.assertTrue(result["ok"])
+        d, g = result["components"]
+        self.assertAlmostEqual(d["center"], 1350, delta=0.5)
+        self.assertAlmostEqual(g["center"], 1585, delta=0.5)
+        self.assertAlmostEqual(d["fwhm"], 120, delta=2)
+        self.assertAlmostEqual(g["fwhm"], 70, delta=2)
+        self.assertAlmostEqual(d["area"] / g["area"], 100 * 120 / (80 * 70), delta=0.03)
+        self.assertAlmostEqual(d["area"], math.pi / 2 * 100 * 120, delta=200)
+        self.assertAlmostEqual(d["share"] + g["share"], 1.0)
+        self.assertGreater(result["r2"], 0.995)
+        self.assertAlmostEqual(result["rmse"], 1.0, delta=0.15)
+        for c in (d, g):                                   # the errors are of the size of the actual deviations
+            self.assertTrue(0 < c["center_err"] < 0.5 and 0 < c["fwhm_err"] < 2 and 0 < c["area_err"] < 300)
+            self.assertFalse(c["at_limit"])
+        np.testing.assert_allclose(result["fit"], result["background"] + sum(result["curves"]))
+        np.testing.assert_allclose(result["residual"], result["y"] - result["fit"])
+
+    def test_shapes_areas_and_the_pseudo_voigt_mixing(self):
+        x = np.arange(0.0, 400.0, 0.5)
+        for model, factor in (("lorentzian", math.pi / 2), ("gaussian", math.sqrt(math.pi / (4 * math.log(2))))):
+            y = peak_shape(x, model, 10, 200, 20)
+            self.assertAlmostEqual(float(np.max(y)), 10)
+            half = x[y >= 5]
+            self.assertAlmostEqual(half[-1] - half[0], 20, delta=0.6)
+            result = fit_multipeak(x, y, [195], model=model, background="none")
+            self.assertAlmostEqual(result["components"][0]["area"], factor * 10 * 20, delta=0.01 * factor * 200)
+        mixed = peak_shape(x, "pvoigt", 10, 200, 20, 0.3) + 1.0
+        result = fit_multipeak(x, mixed, [203], model="pvoigt", background="constant")
+        self.assertAlmostEqual(result["components"][0]["eta"], 0.3, delta=0.01)
+        self.assertAlmostEqual(result["components"][0]["center"], 200, delta=0.01)
+        self.assertAlmostEqual(float(result["background"][0]), 1.0, delta=0.01)
+
+    def test_the_window_limits_and_refusals(self):
+        y = self.carbon()
+        inside = fit_multipeak(self.XC, y, [1585], window=(1500, 1700), max_shift=20)
+        self.assertTrue(inside["ok"])
+        self.assertEqual((inside["x"][0], inside["x"][-1]), (1500.0, 1700.0))
+        stuck = fit_multipeak(self.XC, y, [1300, 1585], max_shift=5)          # the D band lies 50 from its start
+        self.assertTrue(stuck["components"][0]["at_limit"])
+        self.assertAlmostEqual(stuck["components"][0]["center"], 1305, delta=0.2)
+        self.assertEqual(fit_multipeak(self.XC, y, [])["message"], "no_centers")
+        self.assertEqual(fit_multipeak(self.XC, y, [2500])["message"], "center_outside")
+        self.assertEqual(fit_multipeak(self.XC[:6], y[:6], [1002, 1004])["message"], "too_few_points")
+        self.assertEqual(fit_multipeak(self.XC, np.ones(len(self.XC)), [1350])["message"], "flat")
+        self.assertEqual(fit_multipeak(self.XC, y, list(range(1100, 1800, 50)))["message"], "too_many")
+        with self.assertRaises(ValueError):
+            fit_multipeak(self.XC, y, [1350], model="voigt")
+        descending = fit_multipeak(self.XC[::-1], y[::-1], [1340, 1600], max_shift=30)   # FT-IR files run high → low
+        self.assertAlmostEqual(descending["components"][0]["center"], 1350, delta=0.5)
+
+    def test_centres_are_read_from_free_text(self):
+        self.assertEqual(parse_centers("1350, 1580"), [1350.0, 1580.0])
+        self.assertEqual(parse_centers("1350、1580；1620\n 2700 cm"), [1350.0, 1580.0, 1620.0, 2700.0])
+        self.assertEqual(parse_centers(""), [])
+        self.assertEqual(parse_centers(None), [])
+
+    def test_process_reports_the_measured_data_and_the_normalisation(self):
+        y = self.carbon()
+        for mode in ("none", "max", "minmax", "area"):
+            x, out, info = run_process(self.XC, y, x_range=(1100, 1800), baseline_method="linear", normalize_mode=mode)
+            np.testing.assert_allclose(info["raw"], y[(self.XC >= 1100) & (self.XC <= 1800)])
+            np.testing.assert_allclose(out, info["scale"] * (info["raw"] - info["baseline"]) + info["shift"], atol=1e-9)
 
 
 if __name__ == "__main__":
