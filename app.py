@@ -33,8 +33,8 @@ from plot_extras import (
     add_mpl_zoom_inset, add_plotly_zoom_inset, top_labels_height, UNIT_HTML,
 )
 
-APP_VERSION = "1.1"
-LAST_UPDATED = "2026-11-11"
+APP_VERSION = "1.2"
+LAST_UPDATED = "2026-11-13"
 LOCAL_MODE = os.environ.get("RAMAN_MAKER_LOCAL") == "1"
 # Named colours in the graph app's format; copy that app's colors.csv here to share its names.
 COLORS_FILE = Path(__file__).resolve().parent / "colors.csv"
@@ -77,6 +77,20 @@ TRANSLATIONS = {
         "data_header": "📂 スペクトル",
         "upload": "スペクトル（JASCO・Renishaw TXT/WDF・JCAMP-DX / FT-IR テキスト・RRUFF・XY/CSV・Excel）",
         "native_help": "JASCO Spectra Manager の CSV/TXT、Renishaw WiRE の TXT/WDF、`##TITLE=` で始まる FT-IR テキスト・JCAMP-DX、RRUFF、2列以上の XY/CSV/TXT、Excel を読み込めます。列が複数あるファイルは列ごとに別スペクトルになります。",
+        "input_file_tab": "📄 ファイル",
+        "input_paste_tab": "📋 貼り付け",
+        "paste_label": "生データを貼り付け（波数・強度の 2 列以上）",
+        "paste_help": "Excel や測定ソフトからコピーした数値をそのまま貼り付けます。見出し行があれば列名がスペクトル名になります。JASCO・Renishaw のテキストや、`##TITLE=` で始まる JCAMP-DX / FT-IR テキストの中身も貼れます。",
+        "paste_placeholder": "400    0.0123\n402    0.0130\n404    0.0141\n…",
+        "paste_name": "スペクトル名（省略可）",
+        "paste_add": "➕ スペクトルに追加",
+        "paste_added": "追加しました: ",
+        "paste_empty": "貼り付け欄が空です。",
+        "paste_error": "貼り付けたデータを読めませんでした: ",
+        "paste_default": "貼り付け {n}",
+        "other_sources": "作業ファイル・貼り付けのスペクトル（{n}）",
+        "remove_source": "このスペクトルを外す",
+        "remove_source_help": "ファイル欄にないスペクトルです。押すと外れます（元に戻すには開き直すか貼り直してください）。",
         "mode": "測定の種類",
         "mode_raman": "ラマン",
         "mode_ftir": "FT-IR",
@@ -96,7 +110,6 @@ TRANSLATIONS = {
         "duplicate_names": "同名のファイルがあります。ファイル名を変更して選び直してください（現在の作業は保持しています）: ",
         "project_save_error": "作業ファイルを保存できません。データ量やラベルを確認してください: ",
         "scan_count": "{files} ファイル · {scans} スペクトル",
-        "restored": "復元済み: ",
         "data_range": "測定データの全範囲を表示",
         "download_desktop": "PC用をダウンロード (.zip)",
         "desktop_help": "Mac・Windows対応。初回セットアップ後はオフラインで使用できます。",
@@ -133,7 +146,7 @@ TRANSLATIONS = {
         "export_preview_caption": "図サイズ: {width:.1f} × {height:.1f} mm · PNG / TIFF: {dpi} DPI（プレビューは150 DPI）",
         "save_tiff": "📥 TIFF として保存 ({dpi} DPI)",
         "save_png": "📥 PNG として保存 ({dpi} DPI)",
-        "upload_prompt": "ラマン・FT-IR スペクトルを選択するか、保存した作業ファイル（.json）を開いてください。",
+        "upload_prompt": "ラマン・FT-IR スペクトルのファイルを選ぶか、生データを貼り付けるか、保存した作業ファイル（.json）を開いてください。",
         "conditions": "ℹ️ 測定条件",
     },
     "en": {
@@ -162,6 +175,20 @@ TRANSLATIONS = {
         "data_header": "📂 Spectra",
         "upload": "Spectra (JASCO, Renishaw TXT/WDF, JCAMP-DX / FT-IR text, RRUFF, XY/CSV, Excel)",
         "native_help": "Reads JASCO Spectra Manager CSV/TXT, Renishaw WiRE TXT/WDF, FT-IR text and JCAMP-DX files starting with `##TITLE=`, RRUFF, XY/CSV/TXT with two or more columns, and Excel. Extra columns become separate spectra.",
+        "input_file_tab": "📄 Files",
+        "input_paste_tab": "📋 Paste",
+        "paste_label": "Paste raw data (two or more columns: wavenumber, intensity)",
+        "paste_help": "Paste numbers copied from Excel or the instrument software as they are. A header row names the spectra. The contents of JASCO and Renishaw text files and of JCAMP-DX / FT-IR text starting with `##TITLE=` work too.",
+        "paste_placeholder": "400    0.0123\n402    0.0130\n404    0.0141\n…",
+        "paste_name": "Spectrum name (optional)",
+        "paste_add": "➕ Add to the spectra",
+        "paste_added": "Added: ",
+        "paste_empty": "The paste box is empty.",
+        "paste_error": "The pasted data could not be read: ",
+        "paste_default": "Pasted {n}",
+        "other_sources": "Spectra from projects and pasting ({n})",
+        "remove_source": "Remove this spectrum",
+        "remove_source_help": "Spectra that are not in the file box. A click removes one (reopen or paste again to bring it back).",
         "mode": "Measurement",
         "mode_raman": "Raman",
         "mode_ftir": "FT-IR",
@@ -181,7 +208,6 @@ TRANSLATIONS = {
         "duplicate_names": "Files have duplicate names. Rename them and select again; your current work is kept: ",
         "project_save_error": "Could not save the project. Check the data size and labels: ",
         "scan_count": "{files} files · {scans} spectra",
-        "restored": "Restored: ",
         "data_range": "Show the full measured range",
         "download_desktop": "Download PC edition (.zip)",
         "desktop_help": "For Mac and Windows. Works offline after the first setup.",
@@ -218,7 +244,7 @@ TRANSLATIONS = {
         "export_preview_caption": "Figure size: {width:.1f} × {height:.1f} mm · PNG / TIFF: {dpi} DPI (preview: 150 DPI)",
         "save_tiff": "📥 Save as TIFF ({dpi} DPI)",
         "save_png": "📥 Save as PNG ({dpi} DPI)",
-        "upload_prompt": "Choose Raman or FT-IR spectra or open a saved project (.json) to continue.",
+        "upload_prompt": "Choose Raman or FT-IR spectrum files, paste raw data, or open a saved project (.json) to continue.",
         "conditions": "ℹ️ Measurement conditions",
     },
 }
@@ -593,6 +619,8 @@ def _new_project():
             del st.session_state[key]
     st.session_state["_spectrum_bytes"] = {}
     st.session_state.pop("_upload_error", None)
+    for key in ("_paste_count", "_paste_error", "_paste_added"):
+        st.session_state.pop(key, None)
     st.session_state["_file_epoch"] = st.session_state.get("_file_epoch", 0) + 1
     st.session_state["_spectrum_names"] = None
     st.session_state.pop("_project_loaded", None)
@@ -604,6 +632,16 @@ def _new_project():
     st.session_state.pop("_margin_top_auto", None)
 
 
+def _merge_uploads(current: dict, previous: set, files) -> dict:
+    """The uploader's files join the spectra already loaded (from a project or pasted): files taken out of
+    the uploader leave, new or re-chosen files enter (the latest contents win), everything else stays in order."""
+    names = {file.name for file in files}
+    merged = {name: data for name, data in current.items() if name not in previous or name in names}
+    for file in files:
+        merged[file.name] = file.getvalue()
+    return merged
+
+
 def _uploaded_files_changed(widget_key):
     files = st.session_state.get(widget_key) or []
     names = [file.name for file in files]
@@ -612,23 +650,79 @@ def _uploaded_files_changed(widget_key):
         st.session_state["_upload_error"] = ", ".join(duplicates)
         return
     st.session_state.pop("_upload_error", None)
-    st.session_state["_spectrum_bytes"] = {file.name: file.getvalue() for file in files}
+    seen_key = f"_seen_{widget_key}"          # the uploader's files as of its previous change
+    st.session_state["_spectrum_bytes"] = _merge_uploads(st.session_state.get("_spectrum_bytes", {}),
+                                                         st.session_state.get(seen_key, set()), files)
+    st.session_state[seen_key] = set(names)
+
+
+_TEXT_SUFFIX = re.compile(r"\.(?:txt|csv|xy|dat|asc|prn|tsv|jdx|dx|jcamp)$", re.I)
+
+
+def _pasted_source_name(name: str, existing) -> str:
+    """A file-like name for pasted data ('.txt' unless a text extension was typed), unique among the spectra."""
+    if not _TEXT_SUFFIX.search(name):
+        name += ".txt"
+    stem, suffix = os.path.splitext(name)
+    candidate, k = name, 2
+    while candidate in existing:
+        candidate = f"{stem} ({k}){suffix}"
+        k += 1
+    return candidate
+
+
+def _add_pasted_spectrum():
+    text = (st.session_state.get("_paste_text") or "").strip()
+    if not text:
+        st.session_state["_paste_error"] = T["paste_empty"]
+        return
+    count = st.session_state.get("_paste_count", 0) + 1
+    typed = (st.session_state.get("_paste_name") or "").strip()
+    files = dict(st.session_state.get("_spectrum_bytes", {}))
+    name = _pasted_source_name(typed or T["paste_default"].format(n=count), files)
+    data = (text + "\n").encode("utf-8")
+    try:
+        _read_cached(data, name, st.session_state.get("multi_mode", "mean"))     # the same reader as for files
+    except RamanParseError as exc:
+        st.session_state["_paste_error"] = T["paste_error"] + str(exc)
+        return
+    files[name] = data
+    st.session_state["_spectrum_bytes"] = files
+    st.session_state["_paste_count"] = count
+    st.session_state["_paste_text"] = ""
+    st.session_state["_paste_name"] = ""
+    st.session_state.pop("_paste_error", None)
+    st.session_state["_paste_added"] = name
+
+
+def _remove_source(name):
+    files = dict(st.session_state.get("_spectrum_bytes", {}))
+    files.pop(name, None)
+    st.session_state["_spectrum_bytes"] = files
 
 
 def _remap_file_session_state(old_names: list, new_names: list, key_tmpls: list):
-    """When the set of spectra changes, move the index-based settings by spectrum name."""
+    """When the set of spectra changes, move the index-based settings by spectrum name.
+
+    The label boxes are widgets keyed by index and a version. Every remap hands out a version that was
+    never used, so a spectrum landing on an index another spectrum held before does not inherit its text.
+    """
     old_vals: dict[str, dict] = {}
     for old_i, name in enumerate(old_names):
         old_vals[name] = {tmpl: st.session_state.get(tmpl.format(old_i)) for tmpl in key_tmpls}
     for old_i in range(len(old_names)):
         for tmpl in key_tmpls:
             st.session_state.pop(tmpl.format(old_i), None)
+    version = st.session_state.get("_label_version", 0) + 1
+    st.session_state["_label_version"] = version
     for new_i, name in enumerate(new_names):
-        if name in old_vals:
-            for tmpl, val in old_vals[name].items():
-                if val is None:
-                    continue
-                st.session_state[tmpl.format(new_i)] = val + 1 if tmpl.startswith("_ver_") else val
+        for tmpl in key_tmpls:
+            if tmpl.startswith("_ver_"):
+                st.session_state[tmpl.format(new_i)] = version
+                continue
+            val = old_vals.get(name, {}).get(tmpl)
+            if val is not None:
+                st.session_state[tmpl.format(new_i)] = val
 
 
 # ===== 図の初期値（ウィジェットを作る前に決める） =====
@@ -643,20 +737,8 @@ if st.session_state.get("_preset_initialised") is None and st.session_state.get(
     _apply_figure_preset()
 
 # ===== サイドバー =====
+# Data first (files or pasted text), then the project section, then the figure settings.
 st.sidebar.caption(f"Raman Maker {APP_VERSION} · Last updated: {LAST_UPDATED}")
-st.sidebar.header(T["session_header"])
-st.sidebar.caption(T["project_help"])
-session_upload = st.sidebar.file_uploader(T["load_session"], type=["json"], key="_session_upload",
-                                          on_change=_open_uploaded_project)
-if st.session_state.pop("_project_loaded", False):
-    st.sidebar.success(T["project_loaded"])
-if st.session_state.get("_project_error"):
-    st.sidebar.error(T["project_error"] + st.session_state["_project_error"])
-if LOCAL_DATA_DIR and (LOCAL_DATA_DIR / "autosave.json").is_file() and not st.session_state.get("_spectrum_bytes"):
-    st.sidebar.button(T["resume_local"], on_click=_open_local_autosave, **WIDE_BUTTON)
-st.sidebar.button(T["new_project"], on_click=_new_project, **WIDE_BUTTON)
-autosave_status = st.sidebar.empty()
-
 _file_epoch = st.session_state.get("_file_epoch", 0)
 st.sidebar.header(T["data_header"])
 st.sidebar.caption(T["native_help"])
@@ -712,16 +794,28 @@ if active and st.session_state["_mode_auto"]:
         st.session_state["spec_mode"] = _detected
         st.session_state["x_reverse"] = _detected == "ftir"
         _apply_mode_labels()
+# ----- data in: files, or raw text pasted from Excel / the instrument software
+_upload_key = f"spectrum_upload_{_file_epoch}"
+_file_tab, _paste_tab = st.sidebar.tabs([T["input_file_tab"], T["input_paste_tab"]])
+with _file_tab:
+    uploaded_files = st.file_uploader(
+        T["upload"], type=list(SUPPORTED_EXTENSIONS), accept_multiple_files=True,
+        key=_upload_key, on_change=_uploaded_files_changed, args=(_upload_key,),
+    )
+    if st.session_state.get("_upload_error"):
+        st.error(T["duplicate_names"] + st.session_state["_upload_error"])
+with _paste_tab:
+    st.text_area(T["paste_label"], key="_paste_text", height=150, placeholder=T["paste_placeholder"], help=T["paste_help"])
+    st.text_input(T["paste_name"], key="_paste_name",
+                  placeholder=T["paste_default"].format(n=st.session_state.get("_paste_count", 0) + 1))
+    st.button(T["paste_add"], key="_paste_add", on_click=_add_pasted_spectrum, **WIDE_BUTTON)
+    if st.session_state.get("_paste_error"):
+        st.error(st.session_state["_paste_error"])
+    if st.session_state.get("_paste_added"):
+        st.success(T["paste_added"] + st.session_state.pop("_paste_added"))
 spec_mode = st.sidebar.selectbox(T["mode"], ["raman", "ftir"], key="spec_mode", on_change=_mode_chosen,
                                  format_func=lambda v: T["mode_raman"] if v == "raman" else T["mode_ftir"], help=T["mode_help"])
 IS_FTIR = spec_mode == "ftir"
-_upload_key = f"spectrum_upload_{_file_epoch}"
-uploaded_files = st.sidebar.file_uploader(
-    T["upload"], type=list(SUPPORTED_EXTENSIONS), accept_multiple_files=True,
-    key=_upload_key, on_change=_uploaded_files_changed, args=(_upload_key,),
-)
-if st.session_state.get("_upload_error"):
-    st.sidebar.error(T["duplicate_names"] + st.session_state["_upload_error"])
 if IS_FTIR:
     st.sidebar.selectbox(T["ir_display"], ["absorbance", "transmittance"], key="ir_display", on_change=_apply_mode_labels,
                          format_func=lambda v: T["ir_absorbance"] if v == "absorbance" else T["ir_transmittance"],
@@ -740,8 +834,15 @@ st.sidebar.selectbox(
             + ("" if wdf_available() else " Reading .wdf needs the renishawWiRE package (not installed).")))
 if active:
     st.sidebar.caption(T["scan_count"].format(files=len(st.session_state.get("_spectrum_bytes", {})), scans=len(active)))
-if active and not uploaded_files:
-    st.sidebar.caption(T["restored"] + ", ".join(sorted({f.source for f in active})))
+# Spectra that are not in the uploader (restored from a project, or pasted) are listed here, each removable.
+_uploader_names = {file.name for file in (uploaded_files or [])}
+_other_sources = [name for name in st.session_state.get("_spectrum_bytes", {}) if name not in _uploader_names]
+if _other_sources:
+    with st.sidebar.expander(T["other_sources"].format(n=len(_other_sources))):
+        st.caption(T["remove_source_help"])
+        for _name in _other_sources:
+            st.button(f"✕ {_name}", key=f"_rm_{_name}", help=T["remove_source"], on_click=_remove_source, args=(_name,),
+                      **WIDE_BUTTON)
 for _file in active:
     _warn = _file.spectrum.metadata.get("x_units_warning")
     if _warn:
@@ -755,6 +856,20 @@ for _file in active:
     if _skipped:
         st.sidebar.info(ui(f"{_file.source}: 上限を超えた {_skipped} 本は読み込んでいません。",
                            f"{_file.source}: {_skipped} spectra beyond the limit were not read."))
+
+# ----- projects: open, resume the autosave, start afresh (the download button is drawn with the figure)
+st.sidebar.header(T["session_header"])
+st.sidebar.caption(T["project_help"])
+session_upload = st.sidebar.file_uploader(T["load_session"], type=["json"], key="_session_upload",
+                                          on_change=_open_uploaded_project)
+if st.session_state.pop("_project_loaded", False):
+    st.sidebar.success(T["project_loaded"])
+if st.session_state.get("_project_error"):
+    st.sidebar.error(T["project_error"] + st.session_state["_project_error"])
+if LOCAL_DATA_DIR and (LOCAL_DATA_DIR / "autosave.json").is_file() and not st.session_state.get("_spectrum_bytes"):
+    st.sidebar.button(T["resume_local"], on_click=_open_local_autosave, **WIDE_BUTTON)
+st.sidebar.button(T["new_project"], on_click=_new_project, **WIDE_BUTTON)
+autosave_status = st.sidebar.empty()
 
 # ----- graph settings
 st.sidebar.header(T["graph_settings"])

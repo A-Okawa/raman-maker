@@ -51,6 +51,15 @@ def test_source() -> str:
     return ast.unparse(tree) + "\n" + CAPTURE
 
 
+def app_function(name: str):
+    """A pure function of app.py (no Streamlit calls inside), compiled on its own."""
+    tree = ast.parse((APP_DIR / "app.py").read_text(encoding="utf-8"))
+    node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name)
+    namespace: dict = {}
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "app.py", "exec"), namespace)
+    return namespace[name]
+
+
 def data_files(*names) -> dict[str, bytes]:
     return {name: (DATA_DIR / name).read_bytes() for name in names}
 

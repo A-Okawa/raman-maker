@@ -23,6 +23,10 @@ def downloads(at):
         return None
 
 
+def _remove_buttons(at):
+    return [b for b in at.button if (b.key or "").startswith("_rm_")]
+
+
 class UploadTests(unittest.TestCase):
     def test_three_files_stack_in_the_graph_app_look(self):
         at = harness.run_app(harness.data_files(*THREE))
@@ -82,6 +86,96 @@ class UploadTests(unittest.TestCase):
         at = harness.rerun(at, {"multi_mode": "all"})
         r = harness.report(at)
         self.assertEqual(len(r["curves"]), 40)
+
+
+class PasteTests(unittest.TestCase):
+    """Raw text pasted into the sidebar's paste tab (Excel columns, instrument text) becomes a spectrum."""
+    TWO_COLUMNS = "\n".join(f"{x}\t{1000 + 500 * np.exp(-((x - 796) / 6) ** 2):.1f}" for x in range(200, 1001, 2))
+
+    def test_pasted_text_becomes_a_spectrum(self):
+        at = harness.run_app({})
+        at.text_area(key="_paste_text").input("Raman shift\tIntensity\n" + self.TWO_COLUMNS).run()
+        at.button(key="_paste_add").click().run()
+        r = harness.report(at)
+        self.assertEqual(r["names"], ["貼り付け 1.txt"])
+        self.assertEqual(r["labels"], ["貼り付け 1"])
+        self.assertEqual(r["curves"][0][5], 401)
+        self.assertEqual(at.session_state["_paste_text"], "", "the box is cleared once the data is in")
+        self.assertTrue(any("追加しました" in s.value for s in at.success))
+        # a second paste with a name of its own (a dot in it stays); the project keeps both
+        at.text_area(key="_paste_text").input(self.TWO_COLUMNS).run()
+        at.text_input(key="_paste_name").input("Yb2Si2O7 1.5 h").run()
+        at.button(key="_paste_add").click().run()
+        r = harness.report(at)
+        self.assertEqual(r["names"], ["貼り付け 1.txt", "Yb2Si2O7 1.5 h.txt"])
+        self.assertEqual(r["labels"], ["貼り付け 1", "Yb2Si2O7 1.5 h"])
+        self.assertEqual([c[2] for c in r["curves"]], [0.0, 1.0])
+        project = decode_project(r["project"])
+        self.assertEqual(set(project["spectrum_files"]), {"貼り付け 1.txt", "Yb2Si2O7 1.5 h.txt"})
+        again = harness.run_app(project["spectrum_files"], project["settings"])
+        self.assertEqual(harness.report(again)["curves"], r["curves"])
+
+    def test_unreadable_paste_is_reported_and_nothing_added(self):
+        at = harness.run_app({})
+        at.button(key="_paste_add").click().run()
+        self.assertTrue(any("空です" in e.value for e in at.error))
+        at.text_area(key="_paste_text").input("no numbers\nhere either").run()
+        at.button(key="_paste_add").click().run()
+        self.assertTrue(any("読めませんでした" in e.value for e in at.error))
+        self.assertEqual(at.session_state["_spectrum_bytes"], {})
+        self.assertEqual(at.session_state["_paste_text"], "no numbers\nhere either", "the text stays to be corrected")
+        self.assertTrue(any("FT-IR スペクトル" in i.value for i in at.info))
+
+    def test_pasted_ftir_text_switches_the_mode(self):
+        at = harness.run_app({})
+        at.text_area(key="_paste_text").input(harness.data_files("ftir_abs.txt")["ftir_abs.txt"].decode()).run()
+        at.text_input(key="_paste_name").input("No_CO2.jdx").run()
+        at.button(key="_paste_add").click().run()
+        r = harness.report(at)
+        self.assertEqual(r["names"], ["No_CO2.jdx"], "a typed text extension is kept")
+        self.assertEqual(at.session_state["spec_mode"], "ftir")
+        self.assertEqual(r["xlim"], (4000.0, 400.0))
+
+    def test_restored_spectra_are_listed_and_removable(self):
+        at = harness.run_app(harness.data_files(*THREE), {"_val_lbl_2": "Ren<i>i</i>shaw"})
+        self.assertEqual(len(_remove_buttons(at)), 3, "one ✕ per spectrum outside the uploader")
+        at.button(key="_rm_jasco_5SiC_950C.txt").click().run()
+        r = harness.report(at)
+        self.assertEqual(r["names"], ["jasco_5SiC_asSintered.csv", "renishaw_single.txt"])
+        self.assertEqual(r["labels"], ["jasco_5SiC_asSintered", "Ren<i>i</i>shaw"], "settings follow the spectra by name")
+        self.assertEqual(len(_remove_buttons(at)), 2)
+
+    def test_labels_follow_their_spectra_through_additions_and_removals(self):
+        # a first spectrum, a pasted second one (the first's label box is re-keyed), then the first is removed:
+        # the survivor moves to index 0 and must not inherit the label box the first spectrum had there
+        at = harness.run_app(harness.data_files("jasco_5SiC_950C.txt"))
+        at.text_input(key="_inp_lbl_0_v0").input("SiC 950 °C").run()
+        at.text_area(key="_paste_text").input(self.TWO_COLUMNS).run()
+        at.button(key="_paste_add").click().run()
+        self.assertEqual(harness.report(at)["labels"], ["SiC 950 °C", "貼り付け 1"])
+        at.button(key="_rm_jasco_5SiC_950C.txt").click().run()
+        r = harness.report(at)
+        self.assertEqual(r["names"], ["貼り付け 1.txt"])
+        self.assertEqual(r["labels"], ["貼り付け 1"], "the pasted spectrum keeps its own label at its new index")
+        self.assertEqual(r["mpl_legend"], ["貼り付け 1"])
+
+    def test_uploaded_files_join_restored_and_pasted_spectra(self):
+        merge = harness.app_function("_merge_uploads")
+
+        class File:
+            def __init__(self, name, data):
+                self.name, self._data = name, data
+
+            def getvalue(self):
+                return self._data
+
+        current = {"restored.txt": b"r", "貼り付け 1.txt": b"p"}
+        merged = merge(current, set(), [File("a.txt", b"a"), File("b.txt", b"b")])
+        self.assertEqual(list(merged), ["restored.txt", "貼り付け 1.txt", "a.txt", "b.txt"], "uploads append, nothing is lost")
+        merged = merge(merged, {"a.txt", "b.txt"}, [File("b.txt", b"b2")])
+        self.assertEqual(merged, {"restored.txt": b"r", "貼り付け 1.txt": b"p", "b.txt": b"b2"},
+                         "a file taken out of the uploader leaves; a re-read file keeps its place with the new contents")
+        self.assertEqual(merge(merged, {"b.txt"}, []), {"restored.txt": b"r", "貼り付け 1.txt": b"p"}, "an emptied uploader")
 
 
 class ArrangementTests(unittest.TestCase):
