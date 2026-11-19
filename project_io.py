@@ -77,7 +77,7 @@ CHOICES = {
     "marks_label_mode": ("top", "rotated", "none"),
     "zoom_location": ("upper left", "upper right", "lower left", "lower right"),
     "label_side": ("左", "右"),
-    "lang_radio": ("日本語", "English"),
+    "lang_radio": ("日本語", "English", "ไทย", "Tiếng Việt"),
 }
 MAX_AXIS_LABEL = 500
 MAX_MARKS_TEXT = 20000

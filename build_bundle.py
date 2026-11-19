@@ -12,7 +12,7 @@ import zipfile
 
 BUNDLE_FILES = (
     "app.py", "requirements.txt", "raman_io.py", "raman_processing.py", "project_io.py", "figure_style.py",
-    "plot_extras.py", "style_templates.py", "palettes.py", "rich_text.py", "colors.csv",
+    "plot_extras.py", "style_templates.py", "ui_translations.py", "palettes.py", "rich_text.py", "colors.csv",
     "fonts/LiberationSans-Regular.ttf", "fonts/LiberationSans-Bold.ttf",
     "fonts/LiberationSans-Italic.ttf", "fonts/LiberationSans-BoldItalic.ttf",
     "fonts/LiberationSerif-Regular.ttf", "fonts/LiberationSerif-Bold.ttf",

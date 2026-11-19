@@ -17,6 +17,7 @@ from project_io import (
 )
 from raman_io import (read_spectra, RamanParseError, SUPPORTED_EXTENSIONS, condition_summary, wdf_available,
                       spectrum_kind, native_y_units)
+from ui_translations import translate
 from raman_processing import (process, detect_peaks, fit_peak, fit_multipeak, parse_centers, to_absorbance,
                               from_absorbance, MAX_FIT_PEAKS)
 from figure_style import (
@@ -34,7 +35,7 @@ from plot_extras import (
     add_mpl_zoom_inset, add_plotly_zoom_inset, top_labels_height, UNIT_HTML,
 )
 
-APP_VERSION = "1.4"
+APP_VERSION = "1.5"
 LAST_UPDATED = "2026-11-13"
 LOCAL_MODE = os.environ.get("RAMAN_MAKER_LOCAL") == "1"
 # Named colours in the graph app's format; copy that app's colors.csv here to share its names.
@@ -269,13 +270,25 @@ WIDE_BUTTON, WIDE_DOWNLOAD, WIDE_POPOVER = _wide(st.button), _wide(st.download_b
 WIDE_CHART, WIDE_IMAGE = _wide(st.plotly_chart), _wide(st.image)
 
 # ===== 言語選択 / Language selection =====
-_lang_option = st.sidebar.radio("🌐 Language / 言語", ["日本語", "English"], horizontal=True, key="lang_radio")
-_lang_code = "en" if _lang_option == "English" else "ja"
-T = TRANSLATIONS[_lang_code]
+# Japanese and English are written in this file; Thai and Vietnamese are looked up from the English in
+# ui_translations.py (English where an entry is missing). Only the interface changes: figure text stays as typed.
+LANGUAGES = {"日本語": "ja", "English": "en", "ไทย": "th", "Tiếng Việt": "vi"}
+_lang_option = st.sidebar.radio("🌐 Language / 言語 / ภาษา / Ngôn ngữ", list(LANGUAGES), horizontal=True, key="lang_radio")
+_lang_code = LANGUAGES.get(_lang_option, "ja")
+_names_code = _lang_code if _lang_code in ("ja", "en") else "en"      # palette names exist in Japanese and English
+T = (TRANSLATIONS[_lang_code] if _lang_code in TRANSLATIONS
+     else {key: translate(text, _lang_code) for key, text in TRANSLATIONS["en"].items()})
 
 
-def ui(ja, en):
-    return en if _lang_code == "en" else ja
+def ui(ja, en, th=None, vi=None):
+    """Interface text in the chosen language. Fixed strings need only Japanese and English (Thai and
+    Vietnamese come from ui_translations.py); strings built at run time pass ``th`` and ``vi`` themselves."""
+    if _lang_code == "ja":
+        return ja
+    if _lang_code == "en":
+        return en
+    given = th if _lang_code == "th" else vi
+    return given if given is not None else translate(en, _lang_code)
 
 
 def _widget_default(key, default, checkbox=False, number=False):
@@ -485,7 +498,7 @@ def color_picker_popover(key: str, default_hex: str, n_items: int = 1):
         if st.session_state.get(view_key) not in PALETTES:
             st.session_state[view_key] = st.session_state.get("palette", DEFAULT_PALETTE)
         st.selectbox(ui("色の組み合わせ", "Palette"), list(PALETTES), key=view_key,
-                     format_func=lambda k: PALETTE_NAMES[_lang_code][k],
+                     format_func=lambda k: PALETTE_NAMES[_names_code][k],
                      help=ui("グラフ描画appと同じ組み合わせです。濃淡は、色を付けるスペクトルの数（または「濃淡の段数」）で分けた色で、"
                              "一番薄い色でも白地とのコントラストが 3:1 以上です。",
                              "The graph app's palettes. Shades are split by the number of coloured spectra "
@@ -832,7 +845,11 @@ st.sidebar.selectbox(
     help=ui("テキスト書き出しの列や Excel の列は、この設定に関わらず列ごとに別スペクトルになります。"
             + ("" if wdf_available() else "　.wdf の読み込みには renishawWiRE パッケージが必要です（未インストール）。"),
             "Columns of text exports and Excel sheets always become separate spectra."
-            + ("" if wdf_available() else " Reading .wdf needs the renishawWiRE package (not installed).")))
+            + ("" if wdf_available() else " Reading .wdf needs the renishawWiRE package (not installed)."),
+            th="คอลัมน์ของไฟล์ข้อความที่ส่งออกและของ Excel จะเป็นสเปกตรัมแยกกันเสมอ"
+            + ("" if wdf_available() else " การอ่าน .wdf ต้องใช้แพ็กเกจ renishawWiRE (ยังไม่ได้ติดตั้ง)"),
+            vi="Các cột của tệp văn bản xuất ra và của Excel luôn trở thành các phổ riêng."
+            + ("" if wdf_available() else " Đọc .wdf cần gói renishawWiRE (chưa cài đặt).")))
 if active:
     st.sidebar.caption(T["scan_count"].format(files=len(st.session_state.get("_spectrum_bytes", {})), scans=len(active)))
 # Spectra that are not in the uploader (restored from a project, or pasted) are listed here, each removable.
@@ -848,15 +865,21 @@ for _file in active:
     _warn = _file.spectrum.metadata.get("x_units_warning")
     if _warn:
         st.sidebar.warning(ui(f"{_file.source}: 横軸の単位が「{_warn}」です。cm⁻¹ として描きます。",
-                              f"{_file.source}: the x units are '{_warn}'. Drawn as cm⁻¹."))
+                              f"{_file.source}: the x units are '{_warn}'. Drawn as cm⁻¹.",
+                              th=f"{_file.source}: หน่วยแกน x คือ '{_warn}' วาดเป็น cm⁻¹",
+                              vi=f"{_file.source}: đơn vị trục x là '{_warn}'. Được vẽ theo cm⁻¹."))
     _converted = _file.spectrum.metadata.get("x_converted_from")
     if _converted:
         st.sidebar.info(ui(f"{_file.source}: 横軸を {_converted} から波数 (cm⁻¹) に換算しました。",
-                           f"{_file.source}: the x axis was converted from {_converted} to wavenumber (cm⁻¹)."))
+                           f"{_file.source}: the x axis was converted from {_converted} to wavenumber (cm⁻¹).",
+                           th=f"{_file.source}: แปลงแกน x จาก {_converted} เป็นเลขคลื่น (cm⁻¹) แล้ว",
+                           vi=f"{_file.source}: trục x đã được đổi từ {_converted} sang số sóng (cm⁻¹)."))
     _skipped = _file.spectrum.metadata.get("spectra_not_read")
     if _skipped:
         st.sidebar.info(ui(f"{_file.source}: 上限を超えた {_skipped} 本は読み込んでいません。",
-                           f"{_file.source}: {_skipped} spectra beyond the limit were not read."))
+                           f"{_file.source}: {_skipped} spectra beyond the limit were not read.",
+                           th=f"{_file.source}: ไม่ได้อ่าน {_skipped} สเปกตรัมที่เกินขีดจำกัด",
+                           vi=f"{_file.source}: {_skipped} phổ vượt giới hạn không được đọc."))
 
 # ----- projects: open, resume the autosave, start afresh (the download button is drawn with the figure)
 st.sidebar.header(T["session_header"])
@@ -946,7 +969,11 @@ with st.sidebar.expander(ui("前処理（スパイク除去・平滑化・ベー
     st.caption(ui("順番：表示範囲で切り出し → スパイク除去 → 平滑化 → ベースライン差し引き → 正規化。元のデータは変えません。"
                   + ("　FT-IR では吸光度に直してから処理し、表示のときに透過率へ戻します。" if IS_FTIR else ""),
                   "Order: crop to the range → spikes → smoothing → baseline subtraction → normalisation. The data files stay as they are."
-                  + (" FT-IR data are processed in absorbance and converted back for a transmittance display." if IS_FTIR else "")))
+                  + (" FT-IR data are processed in absorbance and converted back for a transmittance display." if IS_FTIR else ""),
+                  th="ลำดับ: ตัดตามช่วงที่แสดง → ลบสไปก์ → ทำให้เรียบ → ลบเบสไลน์ → นอร์มัลไลซ์ ไฟล์ข้อมูลไม่ถูกเปลี่ยน"
+                  + (" ข้อมูล FT-IR ประมวลผลบนค่าการดูดกลืนแสง แล้วแปลงกลับเมื่อแสดงเป็นค่าการส่งผ่าน" if IS_FTIR else ""),
+                  vi="Thứ tự: cắt theo khoảng → gai nhiễu → làm trơn → trừ đường nền → chuẩn hóa. Tệp dữ liệu được giữ nguyên."
+                  + (" Dữ liệu FT-IR được xử lý theo độ hấp thụ rồi đổi lại khi hiển thị độ truyền qua." if IS_FTIR else "")))
     spike_remove = st.checkbox(ui("宇宙線スパイクを除去", "Remove cosmic-ray spikes"),
                                value=_widget_default("spike_remove", False, checkbox=True), key="spike_remove")
     spike_threshold = st.number_input(ui("スパイクのしきい値（修正 z スコア）", "Spike threshold (modified z-score)"), 1.0, 50.0,
@@ -1098,9 +1125,14 @@ with st.sidebar.expander(ui("線・フォント・余白", "Lines, fonts and mar
             st.caption(ui(f"この環境には {st.session_state['font_family']} がないため、字幅が同じ {_actual_font} で描きます。"
                           f"SVG には {st.session_state['font_family']} と書き込むので、手元で開けば {st.session_state['font_family']} になります。",
                           f"{st.session_state['font_family']} is not installed here, so {_actual_font} (same character widths) is used. "
-                          f"SVG files name {st.session_state['font_family']}, so they open in it on your computer."))
+                          f"SVG files name {st.session_state['font_family']}, so they open in it on your computer.",
+                          th=f"สภาพแวดล้อมนี้ไม่มี {st.session_state['font_family']} จึงใช้ {_actual_font} (ความกว้างอักษรเท่ากัน) "
+                             f"ไฟล์ SVG ระบุ {st.session_state['font_family']} จึงเปิดด้วยแบบอักษรนั้นบนคอมพิวเตอร์ของคุณ",
+                          vi=f"Môi trường này không có {st.session_state['font_family']} nên dùng {_actual_font} (cùng độ rộng ký tự). "
+                             f"Tệp SVG ghi {st.session_state['font_family']}, nên sẽ mở bằng phông đó trên máy của bạn."))
         else:
-            st.caption(ui(f"この環境では {_actual_font} を使用します。", f"This environment uses {_actual_font}."))
+            st.caption(ui(f"この環境では {_actual_font} を使用します。", f"This environment uses {_actual_font}.",
+                          th=f"สภาพแวดล้อมนี้ใช้ {_actual_font}", vi=f"Môi trường này dùng {_actual_font}."))
     for _key, _label in (("line_width", ui("スペクトルの線幅 (pt)", "Spectrum line width (pt)")),
                         ("reference_line_width", ui("注記の線幅 (pt)", "Mark line width (pt)")),
                         ("axes_line_width", ui("軸・目盛りの線幅 (pt)", "Axes and tick width (pt)"))):
@@ -1202,10 +1234,14 @@ with st.sidebar.expander(ui("ピーク・注記・拡大図", "Peaks, marks and 
                 # The labels sit above the axes: widen the top margin for them until the person sets margins by hand.
                 st.session_state["margin_top"] = plot_style["margin_top"] = _needed_top
                 st.caption(ui(f"ラベルが収まるように上余白を {100 * (1 - _needed_top):.0f}% にしました（余白を手で変えると自動調整は止まります）。",
-                              f"The top margin was set to {100 * (1 - _needed_top):.0f}% for the labels (editing a margin by hand stops this)."))
+                              f"The top margin was set to {100 * (1 - _needed_top):.0f}% for the labels (editing a margin by hand stops this).",
+                              th=f"ตั้งระยะขอบบนเป็น {100 * (1 - _needed_top):.0f}% เพื่อให้พอดีกับป้ายชื่อ (เมื่อแก้ระยะขอบเอง การปรับอัตโนมัติจะหยุด)",
+                              vi=f"Lề trên được đặt thành {100 * (1 - _needed_top):.0f}% cho vừa các nhãn (tự chỉnh lề bằng tay sẽ dừng việc này)."))
             else:
                 st.caption(ui(f"ラベルは図の上に出ます。上余白を {100 * (1 - _needed_top):.0f}% 以上にすると切れません。",
-                              f"The labels sit above the axes; a top margin of {100 * (1 - _needed_top):.0f}% or more keeps them inside."))
+                              f"The labels sit above the axes; a top margin of {100 * (1 - _needed_top):.0f}% or more keeps them inside.",
+                              th=f"ป้ายชื่ออยู่เหนือแกน ตั้งระยะขอบบนตั้งแต่ {100 * (1 - _needed_top):.0f}% ขึ้นไปเพื่อไม่ให้ถูกตัด",
+                              vi=f"Các nhãn nằm phía trên trục; lề trên từ {100 * (1 - _needed_top):.0f}% trở lên sẽ giữ chúng trong hình."))
                 st.button(ui("上余白をラベルに合わせる", "Fit the top margin to the labels"), key="_fit_top_margin",
                           on_click=lambda: st.session_state.update(margin_top=_needed_top), **WIDE_BUTTON)
     st.markdown(ui("**拡大図**", "**Zoom inset**"))
@@ -1231,7 +1267,9 @@ with st.sidebar.expander(ui("ピーク分離フィット", "Fit overlapping peak
     mfit_centers_text = st.text_input(ui("ピークの初期位置 (cm⁻¹)", "Starting positions (cm⁻¹)"), key="mfit_centers",
                                       placeholder=ui("例: 1350, 1580", "e.g. 1350, 1580"),
                                       help=ui(f"カンマか空白で区切ります（最大 {MAX_FIT_PEAKS} 本）。フィット範囲の外の値は使いません。",
-                                              f"Separate with commas or spaces (up to {MAX_FIT_PEAKS}). Values outside the fit range are not used."))
+                                              f"Separate with commas or spaces (up to {MAX_FIT_PEAKS}). Values outside the fit range are not used.",
+                                              th=f"คั่นด้วยจุลภาคหรือเว้นวรรค (สูงสุด {MAX_FIT_PEAKS} ตำแหน่ง) ค่าที่อยู่นอกช่วงที่ฟิตจะไม่ถูกใช้",
+                                              vi=f"Ngăn cách bằng dấu phẩy hoặc dấu cách (tối đa {MAX_FIT_PEAKS}). Giá trị ngoài khoảng khớp không được dùng."))
     _mf1, _mf2 = st.columns(2)
     _widget_default("mfit_model", "lorentzian")
     mfit_model = _mf1.selectbox(ui("関数", "Model"), ["lorentzian", "gaussian", "pvoigt"], key="mfit_model",
@@ -1278,7 +1316,7 @@ if active:
             with st.container(height=700):
                 st.markdown(ui("#### 色", "#### Colours"))
                 st.selectbox(ui("色の組み合わせ", "Palette"), list(PALETTES), key="palette",
-                    format_func=lambda key: PALETTE_NAMES[_lang_code][key], on_change=_apply_palette,
+                    format_func=lambda key: PALETTE_NAMES[_names_code][key], on_change=_apply_palette,
                     help=ui("グラフ描画app・XRD描画appと同じ色の組み合わせです。選ぶと、表示中のスペクトルに表示順で色が付きます。"
                             "濃淡と viridis は、一番薄い色でも白地とのコントラストが 3:1 以上（細い線の目安）になる濃さから始まります。",
                             "The same palettes as the graph app and XRD Maker. Choosing one colours the visible spectra in display order. "
@@ -1396,7 +1434,9 @@ if active:
                 )
             except (ValueError, np.linalg.LinAlgError, RuntimeError) as exc:
                 st.warning(ui(f"{active[i].name}: 前処理できませんでした（{exc}）。元のデータを表示します。",
-                              f"{active[i].name}: processing failed ({exc}); showing the data as measured."))
+                              f"{active[i].name}: processing failed ({exc}); showing the data as measured.",
+                              th=f"{active[i].name}: ประมวลผลไม่สำเร็จ ({exc}) แสดงข้อมูลตามที่วัด",
+                              vi=f"{active[i].name}: xử lý không thành công ({exc}); hiển thị dữ liệu gốc."))
                 mask = (spectrum.x >= x_min) & (spectrum.x <= x_max)
                 x, y, info = spectrum.x[mask], y_in[mask], {"spikes": 0, "baseline": None, "raw": y_in[mask]}
             info["signal"] = y
@@ -1641,7 +1681,7 @@ if active:
                         x=fx, y=fy, mode="lines", showlegend=False, fill="tonexty" if mfit_fill else None,
                         fillcolor=_rgba(row["color"], 0.15) if mfit_fill else None,
                         line=dict(color=row["color"], width=plot_style["line_width"] * pt * 0.7, dash="dash"),
-                        hovertemplate=ui(f"成分 {_component_number}", f"Component {_component_number}") + "<br>%{x:.1f} " + UNIT_HTML + "<extra></extra>"))
+                        hovertemplate=ui(f"成分 {_component_number}", f"Component {_component_number}", th=f"องค์ประกอบ {_component_number}", vi=f"Thành phần {_component_number}") + "<br>%{x:.1f} " + UNIT_HTML + "<extra></extra>"))
                 else:
                     pfig.add_trace(go.Scatter(
                         x=fx, y=fy, mode="lines", showlegend=False,
@@ -1710,7 +1750,8 @@ if active:
         interactive_tab, export_tab = st.tabs([T["interactive_preview"], T["export_preview"]])
         pfig = build_plotly_figure()
         with interactive_tab:
-            st.caption(T["drag_zoom"] + (ui(f"　／　スパイク除去: {_spikes_removed} 点を置き換え", f"  /  spikes replaced: {_spikes_removed}")
+            st.caption(T["drag_zoom"] + (ui(f"　／　スパイク除去: {_spikes_removed} 点を置き換え", f"  /  spikes replaced: {_spikes_removed}",
+                                            th=f"  /  แทนที่สไปก์: {_spikes_removed} จุด", vi=f"  /  gai nhiễu đã thay: {_spikes_removed} điểm")
                                          if spike_remove else ""))
             st.plotly_chart(pfig, config={"scrollZoom": True, "modeBarButtonsToRemove": ["lasso2d", "select2d"],
                                           "displaylogo": False}, **WIDE_CHART)
@@ -1799,7 +1840,7 @@ if active:
                                  ui("フィットの合計", "Fitted sum"): result["fit"], ui("バックグラウンド", "Background"): result["background"],
                                  ui("残差", "Residual"): result["residual"]}
                         for number, curve in enumerate(result["curves"], start=1):
-                            frame[ui(f"成分 {number}", f"Component {number}")] = curve
+                            frame[ui(f"成分 {number}", f"Component {number}", th=f"องค์ประกอบ {number}", vi=f"Thành phần {number}")] = curve
                         curve_frames.append(pd.DataFrame(frame))
                         residual_fig.add_trace(go.Scatter(x=result["x"], y=result["residual"], mode="lines", name=name,
                                                           line=dict(color=row["color"], width=1.2)))
@@ -1836,7 +1877,13 @@ if active:
                                       + ("　透過率の表示では曲線は図に重ねません（吸光度の表示で確認できます）。" if PEAKS_DOWN else ""),
                                       "A least-squares fit of the processed data" + (" (absorbance)" if IS_FTIR else "") + ". ± is the standard error from the covariance matrix and assumes independent noise at each point. "
                                       "Waves left in the residual mean that the number of components or the model does not match. Areas and heights depend on the normalisation and the baseline, so compare ratios."
-                                      + (" The curves are not drawn on a transmittance display (see them in absorbance)." if PEAKS_DOWN else "")))
+                                      + (" The curves are not drawn on a transmittance display (see them in absorbance)." if PEAKS_DOWN else ""),
+                                      th="เป็นการฟิตแบบกำลังสองน้อยสุดกับข้อมูลหลังประมวลผล" + (" (ค่าการดูดกลืนแสง)" if IS_FTIR else "") + " ค่า ± คือค่าคลาดเคลื่อนมาตรฐานจากเมทริกซ์ความแปรปรวนร่วม โดยสมมติว่าสัญญาณรบกวนของแต่ละจุดเป็นอิสระต่อกัน "
+                                      "หากส่วนเหลือยังเป็นคลื่น แสดงว่าจำนวนองค์ประกอบหรือฟังก์ชันไม่เหมาะสม พื้นที่และความสูงขึ้นกับการนอร์มัลไลซ์และเบสไลน์ จึงควรเปรียบเทียบเป็นอัตราส่วน"
+                                      + (" เมื่อแสดงเป็นค่าการส่งผ่านจะไม่วาดเส้นโค้งบนรูป (ดูได้ในการแสดงค่าการดูดกลืนแสง)" if PEAKS_DOWN else ""),
+                                      vi="Phép khớp bình phương tối thiểu trên dữ liệu đã xử lý" + (" (độ hấp thụ)" if IS_FTIR else "") + ". ± là sai số chuẩn từ ma trận hiệp phương sai, giả định nhiễu tại mỗi điểm độc lập. "
+                                      "Nếu phần dư còn dạng sóng thì số thành phần hoặc hàm chưa phù hợp. Diện tích và chiều cao phụ thuộc vào chuẩn hóa và đường nền, nên hãy so sánh theo tỉ số."
+                                      + (" Khi hiển thị độ truyền qua, các đường cong không được vẽ lên hình (xem ở chế độ độ hấp thụ)." if PEAKS_DOWN else "")))
         with st.expander(ui("処理後のデータ", "Processed data"), expanded=False):
             frames = [pd.DataFrame({ui("スペクトル", "Spectrum"): plain(row["label"]), X_VALUE_NAME: row["x"],
                                     Y_VALUE_NAME + ui("（処理後）", " (processed)"): row["y"],

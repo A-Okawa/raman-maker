@@ -267,6 +267,65 @@ class FitTests(unittest.TestCase):
                          "the fit is of the absorbance whichever display is chosen")
 
 
+class ThaiVietnameseTests(unittest.TestCase):
+    """Thai and Vietnamese interfaces are looked up from the English text; figures do not change."""
+
+    def english_strings(self):
+        import ast
+        tree = ast.parse((harness.APP_DIR / "app.py").read_text(encoding="utf-8"))
+        fixed, built = [], []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", "") == "TRANSLATIONS":
+                fixed += list(ast.literal_eval(node.value)["en"].values())
+            if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "ui":
+                try:
+                    fixed.append(ast.literal_eval(node.args[1]))
+                except ValueError:
+                    built.append(node)
+        return fixed, built
+
+    def test_every_interface_string_has_thai_and_vietnamese(self):
+        import re
+        from ui_translations import UI_TEXT, translate
+        fixed, built = self.english_strings()
+        self.assertGreater(len(fixed), 300)
+        self.assertEqual([s for s in fixed if s not in UI_TEXT], [], "add the new strings to ui_translations.py")
+        for node in built:                       # strings built at run time carry their own translations
+            self.assertEqual({k.arg for k in node.keywords}, {"th", "vi"}, f"app.py line {node.lineno}")
+        for english, entry in UI_TEXT.items():
+            self.assertEqual(set(entry), {"th", "vi"})
+            for text in entry.values():
+                self.assertTrue(text.strip() or not english.strip())
+                for token in re.findall(r"\{[a-z_:.0-9]*\}", english):       # format fields survive
+                    self.assertIn(token, text, english)
+                self.assertEqual(sorted(re.findall(r"`[^`]*`", english)), sorted(re.findall(r"`[^`]*`", text)), english)
+        self.assertEqual(translate("not in the table", "th"), "not in the table")
+
+    def test_the_interface_changes_and_the_figure_does_not(self):
+        files = harness.data_files("jasco_5SiC_950C.txt", "ftir_abs.txt")
+        state = {"show_peaks": True, "mfit_on": True, "mfit_range": (880.0, 1000.0), "mfit_centers": "925, 955",
+                 "spec_mode": "raman", "show_raw": True}
+        reports = {}
+        for language, header, table in (("English", "Spectra", "Component"), ("ไทย", "สเปกตรัม", "องค์ประกอบ"),
+                                        ("Tiếng Việt", "Phổ", "Thành phần")):
+            at = harness.run_app(files, {**state, "lang_radio": language})
+            r = reports[language] = harness.report(at)
+            self.assertTrue(any(header in h.value for h in at.sidebar.header), language)
+            self.assertTrue(any(table in d.value.columns for d in at.dataframe), language)
+        for language in ("ไทย", "Tiếng Việt"):
+            for key in ("xlabel", "ylabel", "mpl_legend", "mpl_texts", "curves", "png"):
+                self.assertEqual(reports[language][key], reports["English"][key], f"{language}: {key}")
+            self.assertEqual(decode_project(reports[language]["project"])["settings"]["lang_radio"], language)
+
+    def test_the_empty_page_and_messages_are_translated(self):
+        at = harness.run_app({}, {"lang_radio": "ไทย"})
+        self.assertTrue(any("วางข้อมูลดิบ" in i.value for i in at.info))
+        at.button(key="_paste_add").click().run()
+        self.assertTrue(any("ช่องวางข้อมูลว่างอยู่" in e.value for e in at.error))
+        at = harness.run_app({}, {"lang_radio": "Tiếng Việt"})
+        self.assertTrue(any("dán dữ liệu thô" in i.value for i in at.info))
+
+
 class ArrangementTests(unittest.TestCase):
     def test_order_visibility_offsets_and_absolute_mode(self):
         at = harness.run_app(harness.data_files(*THREE), {"ord_0": 3, "ord_1": 1, "ord_2": 2, "vis_1": False,
