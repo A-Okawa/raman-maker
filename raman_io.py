@@ -21,6 +21,12 @@ Supported layouts
 Intensities are returned as stored (absorbance or transmittance stay what the file says;
 ``native_y_units`` reports which). Raman shifts / wavenumbers are returned in ascending order.
 Unsupported or damaged files raise ``RamanParseError`` instead of guessing a column.
+
+What the reader left out is recorded, never hidden: ``metadata["_qc_read"]`` lists the text lines
+it skipped inside the data (line number, text, reason), the lines after the data it did not read
+(a footer), rows cut to the column count, the points dropped because a value was not finite
+(position in the file and x), the point count the file declares (NPOINTS) and the count read.
+``qc.input_checks`` turns this into warnings.
 """
 
 from __future__ import annotations
@@ -130,11 +136,24 @@ def _spectrum(name: str, x, y, metadata: dict) -> RamanSpectrum:
     if len(x) > _MAX_POINTS:
         raise RamanParseError("A spectrum has more than 2,000,000 points.")
     keep = np.isfinite(x) & np.isfinite(y)
+    metadata = dict(metadata)
+    record = dict(metadata.get("_qc_read") or {})
+    record["points_in_file"] = int(len(x))
+    dropped = np.flatnonzero(~keep)
+    # position in the file (1 = first point of this spectrum) and x, for the QC report
+    record["nonfinite"] = [(int(k) + 1, float(x[k]) if np.isfinite(x[k]) else None) for k in dropped[:200]]
+    record["nonfinite_count"] = int(len(dropped))
+    metadata["_qc_read"] = record
     x, y = x[keep], y[keep]
     if len(x) < 2:
         raise RamanParseError("A spectrum needs at least two finite points.")
     order = np.argsort(x, kind="stable")
-    return RamanSpectrum(name, x[order], y[order], dict(metadata))
+    return RamanSpectrum(name, x[order], y[order], metadata)
+
+
+def _qc_lines(lines: list, limit: int = 200) -> list:
+    """(line number, first 60 characters, reason) of skipped lines, at most ``limit`` of them."""
+    return [(int(number), str(text)[:60], reason) for number, text, reason in lines[:limit]]
 
 
 def _monotonic(values: np.ndarray) -> bool:
@@ -201,13 +220,19 @@ def _key_value(line: str) -> tuple[str, str]:
     return (parts[0].strip(), parts[1].strip()) if len(parts) == 2 else (line.strip(), "")
 
 
+def _jasco_row(stripped: str) -> bool:
+    tokens = _split(stripped, None)
+    return len(tokens) >= 2 and all(_is_number(t) for t in tokens[:2])
+
+
 def _read_jasco(text: str, filename: str) -> list[RamanSpectrum]:
     lines = text.splitlines()
     metadata: dict[str, Any] = {"format": "JASCO"}
     rows = []
+    skipped = []
     section = None
     state = "header"
-    for line in lines:
+    for number, line in enumerate(lines, start=1):
         stripped = line.strip()
         if state == "header":
             if _JASCO_MARK.match(stripped):
@@ -221,8 +246,14 @@ def _read_jasco(text: str, filename: str) -> list[RamanSpectrum]:
             if not stripped:
                 continue
             tokens = _split(stripped, None)
-            if len(tokens) >= 2 and all(_is_number(t) for t in tokens[:2]):
+            if _jasco_row(stripped):
                 rows.append((_number(tokens[0]), _number(tokens[1])))
+                continue
+            # A line that is not an (x, y) row: the data go on if the next non-empty line is a row again
+            # (a damaged or 'nan' row, recorded); otherwise the extended information starts here.
+            following = next((l.strip() for l in lines[number:] if l.strip()), "")
+            if rows and _jasco_row(following):
+                skipped.append((number, stripped, "not_numeric"))
                 continue
             state = "extended"
         if state == "extended":
@@ -238,6 +269,9 @@ def _read_jasco(text: str, filename: str) -> list[RamanSpectrum]:
     if not rows:
         raise RamanParseError("No XYDATA rows were found in the JASCO file.")
     data = np.asarray(rows, dtype=float)
+    declared = str(metadata.get("NPOINTS", "")).strip()
+    metadata["_qc_read"] = {"skipped": _qc_lines(skipped), "skipped_count": len(skipped), "rows_read": len(rows),
+                            "declared_points": int(float(declared)) if _is_number(declared) else None}
     name = _stem(filename)
     x_units = str(metadata.get("XUNITS", ""))
     if x_units and not re.search(r"cm|raman|shift|wave", x_units, re.I):
@@ -408,7 +442,7 @@ def _finish_jcamp_block(filename: str, metadata: dict, plain_rows: list, data_li
 def _read_jcamp_like(text: str, filename: str) -> list[RamanSpectrum]:
     blocks: list[dict] = []
     current: dict | None = None
-    for raw_line in text.splitlines():
+    for number, raw_line in enumerate(text.splitlines(), start=1):
         line = raw_line.split("$$", 1)[0].rstrip() if not raw_line.lstrip().startswith("$$") else ""
         stripped = line.strip()
         if not stripped:
@@ -420,11 +454,11 @@ def _read_jcamp_like(text: str, filename: str) -> list[RamanSpectrum]:
                 continue
             if key.upper() == "TITLE" and (current is None or current["seen_title"]):
                 current = {"metadata": {"format": "JCAMP"}, "rows": [], "data_lines": [], "form": None,
-                           "seen_title": True, "in_data": False}
+                           "seen_title": True, "in_data": False, "skipped": []}
                 blocks.append(current)
             if current is None:
                 current = {"metadata": {"format": "JCAMP"}, "rows": [], "data_lines": [], "form": None,
-                           "seen_title": False, "in_data": False}
+                           "seen_title": False, "in_data": False, "skipped": []}
                 blocks.append(current)
             upper = key.upper()
             if upper in ("XYDATA", "XYPOINTS", "PEAK TABLE", "DATA TABLE"):
@@ -448,8 +482,17 @@ def _read_jcamp_like(text: str, filename: str) -> list[RamanSpectrum]:
         tokens = _split(stripped, None)
         if len(tokens) >= 2 and all(_is_number(t) for t in tokens[:2]):
             current["rows"].append((_number(tokens[0]), _number(tokens[1])))
+        else:
+            current["skipped"].append((number, stripped, "not_numeric" if len(tokens) >= 2 else "short"))
     spectra = []
     for index, block in enumerate(blocks):
+        rows = block["rows"]
+        block["metadata"]["_qc_read"] = {
+            "skipped": _qc_lines(block["skipped"]), "skipped_count": len(block["skipped"]),
+            "rows_read": len(rows) if rows else None,
+            "declared_points": int(float(block["metadata"]["NPOINTS"])) if _is_number(str(block["metadata"].get("NPOINTS", ""))) else None,
+        } if block["form"] is None else {
+            "declared_points": int(float(block["metadata"]["NPOINTS"])) if _is_number(str(block["metadata"].get("NPOINTS", ""))) else None}
         spectrum = _finish_jcamp_block(filename, block["metadata"], block["rows"], block["data_lines"],
                                        block["form"], index, len(blocks))
         if spectrum is not None:
@@ -466,42 +509,67 @@ _COMMENT = re.compile(r"^\s*(#|//|%|!)")
 def _read_generic_text(text: str, filename: str) -> list[RamanSpectrum]:
     lines = text.splitlines()
     comments, header, data_lines = [], None, []
-    for line in lines:
+    for number, line in enumerate(lines, start=1):
         stripped = line.strip()
         if not stripped:
             continue
         if _COMMENT.match(stripped):
-            comments.append(stripped)
+            if data_lines:
+                data_lines.append((number, stripped))      # a comment inside the data is recorded below
+            else:
+                comments.append(stripped)
             continue
         if not data_lines and header is None:
             tokens = _split(stripped, None)
             if tokens and not _is_number(tokens[0]):
                 header = stripped
                 continue
-        data_lines.append(stripped)
+        data_lines.append((number, stripped))
     if not data_lines:
         raise RamanParseError("No numeric rows were found. " + _EXPORT_HELP)
-    delimiter = _detect_delimiter(data_lines)
-    rows, width = [], None
-    for line in data_lines:
-        tokens = _decimal_comma(_split(line, delimiter))
+    delimiter = _detect_delimiter([line for _, line in data_lines])
+    rows, row_numbers, width = [], [], None
+    bad, cut = [], []
+    for number, line in data_lines:
+        tokens = _decimal_comma(_split(line, delimiter)) if not _COMMENT.match(line) else []
         if not tokens or not all(_is_number(t) for t in tokens):
             if rows:
-                break          # trailing text (a footer): stop at the first bad row after data
+                bad.append((number, line, "not_numeric"))
             continue           # leading junk before the data
         if width is None:
             width = len(tokens)
         if len(tokens) != width:
             if len(tokens) > width:
+                cut.append(number)
                 tokens = tokens[:width]
             else:
+                bad.append((number, line, "short"))
                 continue
         rows.append([_number(t) for t in tokens])
+        row_numbers.append(number)
     if not rows or width is None or width < 2:
         raise RamanParseError("At least two numeric columns (Raman shift and intensity) are needed. " + _EXPORT_HELP)
+    last = row_numbers[-1]
+    skipped = [b for b in bad if b[0] < last]
+    footer = [b for b in bad if b[0] > last]
     columns = np.asarray(rows, dtype=float)
+    if skipped and not _monotonic(columns[:, 0]):
+        # Rows after a bad line do not continue the x axis (a second table, a numeric footer): read only
+        # up to the first bad line, as before, and report everything after it as not read.
+        first_bad = skipped[0][0]
+        keep = [k for k, n in enumerate(row_numbers) if n < first_bad]
+        if len(keep) >= 2 and _monotonic(columns[keep, 0]):
+            footer = [(n, l, r) for n, l, r in bad if n >= first_bad] + \
+                     [(n, "(numeric row after the data)", "after_data") for n in row_numbers if n > first_bad]
+            footer.sort()
+            skipped = []
+            columns = columns[keep]
+            cut = [n for n in cut if n < first_bad]
     names = _column_names(header, comments, delimiter, width)
-    metadata: dict[str, Any] = {"format": "text"}
+    metadata: dict[str, Any] = {"format": "text", "_qc_read": {
+        "skipped": _qc_lines(skipped), "skipped_count": len(skipped),
+        "footer": _qc_lines(footer, 20), "footer_count": len(footer),
+        "cut_rows": cut[:200], "cut_count": len(cut), "rows_read": int(len(columns))}}
     if names and any(re.search(r"wave|shift|raman", n, re.I) for n in names) and len(names) > 2:
         return _read_named_columns(filename, names, columns, metadata)
     return _columns_to_spectra(filename, names, columns, metadata)
@@ -716,7 +784,7 @@ def condition_summary(metadata: dict) -> list[tuple[str, str]]:
                         r"units|data type|instrument|sample|origin|owner|x_converted_from|x_name|y_name", re.I)
     rows = []
     for key, value in metadata.items():
-        if key in ("format", "x_units_warning", "spectra_not_read") or value in (None, ""):
+        if key in ("format", "x_units_warning", "spectra_not_read") or str(key).startswith("_") or value in (None, ""):
             continue
         if str(key).upper() == "TITLE" and "\ufffd" in str(value):
             continue                          # a title the instrument wrote in an encoding the export lost

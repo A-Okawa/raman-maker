@@ -44,6 +44,11 @@ if active:
                                  for c in fit_of(r)["components"]]} for r in curves],
         "mpl_styles": [(l.get_linestyle(), l.get_color(), round(l.get_alpha() or 1.0, 2), len(l.get_xdata())) for l in fig.axes[0].get_lines()],
         "mpl_fills": len(fig.axes[0].collections),
+        "qc_overall": QC_OVERALL,
+        "qc_items": [(i["section"], i["subject"], i["code"], i["status"], i["component"]) for i in qc_items],
+        "qc_report": json.loads(json.dumps(_finite(qc_report()), default=_json_default)),
+        "qc_csv": {sections: csv_file(pd.DataFrame({"a": [1.0]}), "probe", sections)
+                   for sections in (("input", "processing"), ("input", "processing", "peaks"), ("input", "processing", "fit"))},
         "preview_all": [(t.line.dash, t.line.color, len(t.x), t.fill) for t in pfig.data if t.mode == "lines" and (t.xaxis in (None, "x"))],
     }
 '''

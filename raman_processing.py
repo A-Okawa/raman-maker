@@ -60,6 +60,16 @@ def to_absorbance(y, units: str = "absorbance"):
     return -np.log10(np.maximum(fraction, _T_FLOOR / 100.0))
 
 
+def clipped_points(y, units: str = "absorbance"):
+    """Boolean mask of the points ``to_absorbance`` clips (transmittance at or below the floor)."""
+    y = _array(y)
+    if units == "transmittance_percent":
+        return y <= _T_FLOOR
+    if units == "transmittance_fraction":
+        return y <= _T_FLOOR / 100.0
+    return np.zeros(len(y), dtype=bool)
+
+
 def from_absorbance(a, units: str = "absorbance"):
     """Values in ``units`` from absorbance: T = 10^(-A) (as a fraction or in %)."""
     a = _array(a)
@@ -105,6 +115,29 @@ def remove_spikes(y, threshold: float = 6.0, window: int = 3):
         if neighbours:
             cleaned[k] = float(np.mean(neighbours))
     return cleaned, int(spike.sum())
+
+
+def spike_report(x, before, after, half_window: int = 10) -> list[dict]:
+    """The points spike removal changed: index, x, value before and after, and ``neighbour_ratio``.
+
+    ``neighbour_ratio`` is the height of the higher neighbour above the local median divided by the
+    height of the replaced point above it. A cosmic-ray spike occupies one point, so its neighbours
+    sit at the local level (ratio near 0); a real peak a few points wide lifts its neighbours too
+    (a Lorentzian of FWHM 4 sampled every 1 cm⁻¹ gives about 0.8). The ratio is a warning sign only.
+    """
+    x, before, after = _array(x), _array(before), _array(after)
+    changed = np.flatnonzero(before != after)
+    out = []
+    for k in changed:
+        lo, hi = max(0, k - half_window), min(len(before), k + half_window + 1)
+        local = np.delete(before[lo:hi], [j - lo for j in (k - 1, k, k + 1) if lo <= j < hi])
+        level = float(np.median(local)) if len(local) else float(np.median(before))
+        excess = float(before[k]) - level
+        neighbours = [before[j] for j in (k - 1, k + 1) if 0 <= j < len(before)]
+        ratio = (max(neighbours) - level) / excess if excess > 0 and neighbours else math.nan
+        out.append({"index": int(k), "x": float(x[k]), "before": float(before[k]), "after": float(after[k]),
+                    "neighbour_ratio": float(ratio)})
+    return out
 
 
 # ---------------------------------------------------------------------------------- smoothing
@@ -207,7 +240,10 @@ def baseline(x, y, method: str = "none", **params):
 # -------------------------------------------------------------------------------- normalisation
 def normalize(y, mode: str = "max", x=None, window=None):
     """Scale a spectrum: 'max' → max = 1, 'window' → max within the window = 1 (window on x),
-    'minmax' → min 0 / max 1, 'area' → unit area (trapezoid on x), 'none' → unchanged."""
+    'minmax' → min 0 / max 1, 'area' → unit area (trapezoid on x), 'none' → unchanged.
+
+    A window without data points raises ValueError (``process`` then leaves the spectrum
+    unnormalised and reports it); an all-zero spectrum is returned unchanged."""
     y = _array(y)
     if mode == "none":
         return y.copy()
@@ -224,7 +260,7 @@ def normalize(y, mode: str = "max", x=None, window=None):
         low, high = sorted((float(window[0]), float(window[1])))
         inside = (x >= low) & (x <= high)
         if not inside.any():
-            return normalize(y, "max")
+            raise ValueError("The normalisation window contains no data points.")
         top = float(np.max(np.abs(y[inside])))
         return y / top if top > 0 else y.copy()
     if mode == "area":
@@ -252,6 +288,16 @@ def detect_peaks(x, y, prominence_fraction: float = 0.1, min_distance: float = 5
     distance = max(1, int(round(min_distance / step)))
     indices, _ = find_peaks(y, prominence=prominence_fraction * span, distance=distance)
     return indices
+
+
+def peak_prominences_of(y, indices):
+    """Prominence of each detected peak (its height above the higher of the two bases)."""
+    from scipy.signal import peak_prominences
+    y = _array(y)
+    indices = np.asarray(indices, dtype=int)
+    if not len(indices):
+        return np.array([])
+    return peak_prominences(y, indices)[0]
 
 
 def _lorentzian(x, height, center, hwhm, offset, slope):
@@ -291,6 +337,13 @@ def fit_peak(x, y, center_guess: float, half_window: float = 15.0, model: str = 
     except (RuntimeError, ValueError):
         return result
     height, center, width, offset, slope = (float(v) for v in params)
+    step = float(np.median(np.diff(xs))) if len(xs) > 1 else 1.0
+    limits = []
+    if width <= bounds[0][2] * 1.02 or width >= bounds[1][2] * 0.98:
+        limits.append("fwhm")
+    if center - xs[0] <= step or xs[-1] - center <= step:
+        limits.append("center")
+    result["limits"] = limits
     fit = function(xs, *params)
     residual = float(np.sqrt(np.mean((ys - fit) ** 2)))
     if span_y <= 0 or not (xs[0] < center < xs[-1]) or height < 0.05 * span_y or residual > span_y:
@@ -474,12 +527,21 @@ def fit_multipeak(x, y, centers, window=None, model: str = "lorentzian", backgro
         eta = float(peak[3]) if model == "pvoigt" else (1.0 if model == "lorentzian" else 0.0)
         factor = _area_factor(model, eta)
         area = factor * height * fwhm
+        i0 = k * per_peak
+        limits = []                    # parameters that ended on (or next to) a bound
+        if abs(center - centers[k]) >= 0.98 * shift or center <= lower[i0 + 1] + 1e-9 * span_x or center >= upper[i0 + 1] - 1e-9 * span_x:
+            limits.append("center")
+        if fwhm >= 0.98 * span_x or fwhm <= 2.05 * step:
+            limits.append("fwhm")
+        if height <= 1e-9 * span_y:
+            limits.append("height")
+        if model == "pvoigt" and (eta <= 1e-3 or eta >= 1 - 1e-3):
+            limits.append("eta")
         entry = {"center": center, "fwhm": fwhm, "height": height, "area": area, "eta": eta,
                  "center_err": math.nan, "fwhm_err": math.nan, "height_err": math.nan, "area_err": math.nan,
-                 "eta_err": math.nan, "start": centers[k],
-                 "at_limit": bool(abs(center - centers[k]) >= 0.98 * shift or fwhm >= 0.98 * span_x or fwhm <= 2.05 * step)}
+                 "eta_err": math.nan, "start": centers[k], "limits": limits,
+                 "at_limit": bool(limits)}
         if errors_ok:
-            i0 = k * per_peak
             block = covariance[i0:i0 + per_peak, i0:i0 + per_peak]
             sigma = np.sqrt(np.clip(np.diag(block), 0, None))
             entry.update(height_err=float(sigma[0]), center_err=float(sigma[1]), fwhm_err=float(sigma[2]))
@@ -489,6 +551,11 @@ def fit_multipeak(x, y, centers, window=None, model: str = "lorentzian", backgro
                 gradient.append((_LORENTZ_AREA - _GAUSS_AREA) * height * fwhm)
             gradient = np.asarray(gradient)
             entry["area_err"] = float(math.sqrt(max(float(gradient @ block @ gradient), 0.0)))
+            # A covariance-based error describes a parameter free to move both ways; on a bound it does not.
+            for name in limits:
+                entry[f"{name}_err"] = math.nan
+            if {"height", "fwhm", "eta"} & set(limits):
+                entry["area_err"] = math.nan
         components.append(entry)
     total_area = sum(c["area"] for c in components)
     noise = estimate_noise(y)
@@ -552,19 +619,27 @@ def process(x, y, *, x_range=None, spikes: float | None = None, smooth_window: i
             normalize_mode: str = "none", normalize_window=None):
     """The whole chain in the app's order: crop → spikes → smoothing → baseline → normalisation.
 
-    Returns (x, y, info) where info reports the number of replaced spikes, the subtracted
-    baseline and the cropped data as measured (``raw``), both on the cropped x, and the
-    normalisation as ``scale`` and ``shift``, so the app can show them.
+    Returns (x, y, info) where info reports the number of replaced spikes and their details
+    (``spike_points``, see spike_report), the subtracted baseline and the cropped data as measured
+    (``raw``), both on the cropped x, the normalisation as ``scale`` and ``shift`` (and
+    ``normalize_problem`` when it could not be applied), and ``noise``: the point-to-point noise of
+    the data before smoothing, on the scale of the returned spectrum.
     """
     x, y = _array(x), _array(y)
     if x_range is not None:
         x, y = crop(x, y, *x_range)
-    info = {"spikes": 0, "baseline": None, "raw": y.copy(), "scale": 1.0, "shift": 0.0}
+    info = {"spikes": 0, "baseline": None, "raw": y.copy(), "scale": 1.0, "shift": 0.0, "spike_points": [],
+            "noise": math.nan, "normalize_problem": None, "smoothed": False}
     if len(y) == 0:
         return x, y, info
     if spikes:
-        y, info["spikes"] = remove_spikes(y, spikes)
+        cleaned, info["spikes"] = remove_spikes(y, spikes)
+        info["spike_points"] = spike_report(x, y, cleaned)
+        y = cleaned
+    # Noise of the data before smoothing (smoothing hides it); scaled with the normalisation below.
+    noise = estimate_noise(y)
     if smooth_window and smooth_window >= 3:
+        info["smoothed"] = True
         y = smooth(y, smooth_window, smooth_order)
     if baseline_method != "none":
         base = baseline(x, y, baseline_method, **(baseline_params or {}))
@@ -572,10 +647,17 @@ def process(x, y, *, x_range=None, spikes: float | None = None, smooth_window: i
         y = y - base
     if normalize_mode != "none":
         before = y
-        y = normalize(y, normalize_mode, x, normalize_window)
+        if normalize_mode == "window" and normalize_window is not None and \
+                not ((x >= min(normalize_window)) & (x <= max(normalize_window))).any():
+            info["normalize_problem"] = "window_empty"         # left unnormalised, reported by the QC
+        else:
+            y = normalize(y, normalize_mode, x, normalize_window)
+            if np.ptp(before) == 0:
+                info["normalize_problem"] = "flat"               # nothing to scale by
         # Normalisation is y → scale·y + shift; the app uses the pair to draw the measured data and
         # the subtracted baseline on the scale of the processed spectrum.
         if np.ptp(before) > 0:
             info["scale"] = float(np.ptp(y) / np.ptp(before))
             info["shift"] = float(np.mean(y) - info["scale"] * np.mean(before))
+    info["noise"] = float(noise * abs(info["scale"])) if math.isfinite(noise) else math.nan
     return x, y, info

@@ -8,6 +8,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import numpy as np
 
 import harness
+from harness import APP_DIR as _APP_DIR
+import ast as _ast
+APP_VERSION = next(_ast.literal_eval(n.value) for n in _ast.parse((_APP_DIR / 'app.py').read_text(encoding='utf-8')).body if isinstance(n, _ast.Assign) and getattr(n.targets[0], 'id', '') == 'APP_VERSION')
 from project_io import decode_project
 from raman_io import wdf_available
 from style_templates import decode_style_template
@@ -21,6 +24,11 @@ def downloads(at):
         return list(at.sidebar.download_button)
     except AttributeError:
         return None
+
+
+def _table_with(at, column):
+    """The first table on the page that has ``column`` (the QC Report's table comes first)."""
+    return next(d.value for d in at.dataframe if column in d.value.columns)
 
 
 def _remove_buttons(at):
@@ -202,13 +210,12 @@ class FitTests(unittest.TestCase):
         self.assertEqual(r["mpl_legend"], plain["mpl_legend"])
         self.assertEqual(len(r["preview_all"]), len(plain["preview_all"]) + 3)
         self.assertEqual(sum(1 for t in r["preview_all"] if t[0] == "dash"), 2)
-        table = at.dataframe[0].value
+        table = _table_with(at, "面積比（対 成分1）")
         self.assertEqual(len(table), 2)
-        self.assertIn("面積比（対 成分1）", table.columns)
-        for column in ("判定", "換算 χ²", "残差の自己相関", "最大のパラメータ相関", "高さ／雑音"):
+        for column in ("QC", "換算 χ²", "残差の自己相関", "最大のパラメータ相関", "高さ／雑音"):
             self.assertIn(column, table.columns)
-        self.assertEqual(set(table["判定"]), {"✓"} if not fit["warnings"] else {f"⚠ {len(fit['warnings'])}"})
-        self.assertEqual(bool(fit["warnings"]), any("確認が必要" in w.value for w in at.warning))
+        self.assertEqual(set(table["QC"]), {"PASS"}, "a sound two-band fit passes every check")
+        self.assertFalse(any("確認が必要" in w.value for w in at.warning))
         # one component for the two bands is reported, and smoothing is pointed out
         wrong = harness.rerun(at, {"mfit_centers": "940", "mfit_max_shift": 30.0, "smooth_on": True})
         self.assertTrue(harness.report(wrong)["fits"][0]["warnings"])
@@ -237,7 +244,7 @@ class FitTests(unittest.TestCase):
         self.assertEqual(len(r["fits"][0]["components"]), 1)
         r = harness.report(harness.rerun(at, {"mfit_centers": "925", "mfit_range": (924.0, 926.0)}))
         self.assertFalse(r["fits"][0]["ok"])
-        self.assertTrue(any("フィットできませんでした" in w.value for w in at.warning))
+        self.assertTrue(any("フィットできませんでした" in e.value and "FAIL" in e.value for e in at.error))
 
     def test_measured_data_and_baseline_overlays(self):
         files = harness.data_files("jasco_5SiC_950C.txt")
@@ -309,7 +316,7 @@ class ThaiVietnameseTests(unittest.TestCase):
         for language, header, table in (("English", "Spectra", "Component"), ("ไทย", "สเปกตรัม", "องค์ประกอบ"),
                                         ("Tiếng Việt", "Phổ", "Thành phần")):
             at = harness.run_app(files, {**state, "lang_radio": language})
-            r = reports[language] = harness.report(at)
+            reports[language] = harness.report(at)
             self.assertTrue(any(header in h.value for h in at.sidebar.header), language)
             self.assertTrue(any(table in d.value.columns for d in at.dataframe), language)
         for language in ("ไทย", "Tiếng Việt"):
@@ -324,6 +331,82 @@ class ThaiVietnameseTests(unittest.TestCase):
         self.assertTrue(any("ช่องวางข้อมูลว่างอยู่" in e.value for e in at.error))
         at = harness.run_app({}, {"lang_radio": "Tiếng Việt"})
         self.assertTrue(any("dán dữ liệu thô" in i.value for i in at.info))
+
+
+class QcPanelTests(unittest.TestCase):
+    """The QC Report in the running app (all data synthetic)."""
+    FIT = {"xrange": (700.0, 1000.0), "mfit_on": True, "mfit_range": (880.0, 1000.0), "mfit_centers": "925, 955",
+           "show_peaks": True, "peak_fit": True}
+
+    def _panel(self, at):
+        return next(e for e in at.expander if e.label.startswith("🔎"))
+
+    def test_clean_data_pass_and_the_report_records_everything(self):
+        # An ALS baseline with λ = 1e5 cuts into the band wings of these 1 cm⁻¹ data (FWHM 6.0 → 5.3 / 4.9 cm⁻¹):
+        # the fit is then flagged. A linear baseline leaves the bands alone and everything passes.
+        als = harness.report(harness.run_app(harness.data_files("jasco_5SiC_950C.txt"),
+                                             {**self.FIT, "baseline_method": "als", "_qc_edit_thresholds": True}))
+        self.assertEqual(als["qc_overall"], "WARNING")
+        self.assertIn(("fit", "jasco_5SiC_950C", "autocorr", "WARNING", None), als["qc_items"])
+        at = harness.run_app(harness.data_files("jasco_5SiC_950C.txt"), {**self.FIT, "spike_remove": True, "baseline_method": "linear"})
+        r = harness.report(at)
+        self.assertEqual(r["qc_overall"], "PASS", [i for i in r["qc_items"] if i[3] not in ("PASS", "NOT EVALUATED")])
+        self.assertIn("PASS", self._panel(at).label)
+        self.assertFalse(any("QC:" in w.value for w in at.warning))
+        report = r["qc_report"]
+        self.assertEqual(report["format"], "raman-maker-qc-report")
+        self.assertEqual(report["app"]["version"], APP_VERSION)
+        self.assertEqual(set(report["environment"]), {"python", "numpy", "scipy", "pandas", "matplotlib", "streamlit"})
+        self.assertEqual(report["inputs"][0]["file"], "jasco_5SiC_950C.txt")
+        self.assertEqual(len(report["inputs"][0]["sha256"]), 64)
+        self.assertEqual(report["processing"]["order"], ["crop to the range", "spike removal", "baseline subtraction", "normalisation"])
+        self.assertEqual(report["processing"]["baseline"]["method"], "linear")
+        self.assertTrue(all(t["provisional"] for t in report["thresholds"].values()))
+        self.assertEqual(report["fit"]["initial_centres_cm-1"], [925.0, 955.0])
+        self.assertIn("Trust Region Reflective", report["fit"]["optimizer"])
+        self.assertEqual(len(report["fit"]["results"][0]["components"]), 2)
+        self.assertEqual(len(report["peaks"]["spectra"][0]["peaks"]), 3)
+        self.assertTrue(all(item["reason"] for item in report["items"]))
+        for sections, (data, name) in r["qc_csv"].items():
+            self.assertFalse(data.decode("utf-8-sig").startswith("#"), sections)
+            self.assertNotIn("QC-", name)
+
+    def test_a_damaged_file_is_flagged_everywhere(self):
+        rows = harness.data_files("two_col.xy")["two_col.xy"].decode().splitlines()
+        rows[40] = rows[40].split()[0] + " nan"
+        at = harness.run_app({"damaged.xy": "\n".join(rows).encode()}, {"show_peaks": True})
+        r = harness.report(at)
+        self.assertEqual(r["qc_overall"], "WARNING")
+        self.assertIn(("input", "damaged", "skipped_lines", "WARNING", None), r["qc_items"])
+        self.assertIn("WARNING", self._panel(at).label)
+        self.assertTrue(any("QC: WARNING" in w.value for w in at.warning))
+        table = _table_with(at, "理由")
+        self.assertTrue(any("行 41" in reason for reason in table["理由"]))
+        data, name = r["qc_csv"][("input", "processing")]
+        self.assertTrue(name.endswith("_QC-WARNING.csv"))
+        text = data.decode("utf-8-sig")
+        self.assertTrue(text.startswith("# Raman Maker"))
+        self.assertIn("Unreadable lines inside the data", text)
+
+    def test_smoothed_fits_are_not_evaluated_and_thresholds_follow_the_project(self):
+        at = harness.run_app(harness.data_files("jasco_5SiC_950C.txt"), {**self.FIT, "smooth_on": True})
+        r = harness.report(at)
+        self.assertEqual(r["qc_overall"], "NOT EVALUATED")
+        self.assertIn(("fit", "jasco_5SiC_950C", "chi2", "NOT EVALUATED", None), r["qc_items"])
+        self.assertTrue(r["qc_csv"][("input", "processing", "fit")][0].decode("utf-8-sig").startswith("#"))
+        # a stricter χ² limit is applied, kept in the project and in the report
+        r = harness.report(harness.rerun(at, {"smooth_on": False, "qc_chi2_caution": 1.0, "qc_chi2_warning": 1.2}))
+        self.assertIn(("fit", "jasco_5SiC_950C", "chi2", "WARNING", None), r["qc_items"])
+        self.assertEqual(r["qc_report"]["thresholds"]["chi2_warning"]["value"], 1.2)
+        project = decode_project(r["project"])
+        self.assertEqual(project["settings"]["qc_chi2_warning"], 1.2)
+        again = harness.report(harness.run_app(project["spectrum_files"], project["settings"]))
+        self.assertEqual(again["qc_items"], r["qc_items"])
+
+    def test_the_panel_follows_the_interface_language(self):
+        for language, word in (("English", "analysis quality"), ("ไทย", "คุณภาพ"), ("Tiếng Việt", "chất lượng")):
+            at = harness.run_app(harness.data_files("jasco_5SiC_950C.txt"), {"lang_radio": language})
+            self.assertIn(word, self._panel(at).label, language)
 
 
 class ArrangementTests(unittest.TestCase):
@@ -361,8 +444,8 @@ class ProcessingTests(unittest.TestCase):
         r = harness.report(at)
         self.assertEqual(r["mpl_axes"], 2, "main axes plus the inset")
         self.assertEqual(len(r["peaks"]), 9)
-        self.assertEqual(r["peaks"][0]["位置 (cm⁻¹)"], 796.0)
-        self.assertAlmostEqual(r["peaks"][0]["フィット中心 (cm⁻¹)"], 796.0, delta=0.2)
+        self.assertEqual(r["peaks"][0]["Position (cm-1)"], 796.0)
+        self.assertAlmostEqual(r["peaks"][0]["Fitted centre (cm-1)"], 796.0, delta=0.2)
         self.assertGreater(len(r["yticks"]), 2)
         self.assertIn("796 SiC (TO)", r["preview_annotations"])
         self.assertIn("924 Yb<sub>2</sub>Si<sub>2</sub>O<sub>7</sub>", r["preview_annotations"])
@@ -443,9 +526,9 @@ class FtirTests(unittest.TestCase):
         for curve in r["curves"]:
             self.assertAlmostEqual(curve[4], 95.0, delta=1.5, msg="both files plot the same transmittance (%)")
             self.assertAlmostEqual(curve[3], 35.0, delta=1.5)
-        positions = sorted({round(p["位置 (cm⁻¹)"]) for p in r["peaks"]})
+        positions = sorted({round(p["Position (cm-1)"]) for p in r["peaks"]})
         self.assertTrue(any(abs(p - 1080) <= 4 for p in positions) and any(abs(p - 3400) <= 20 for p in positions), positions)
-        self.assertEqual(set(r["peaks"][0]) >= {"透過率 (%)"}, True)
+        self.assertEqual(set(r["peaks"][0]) >= {"Transmittance (%)"}, True)
         self.assertTrue(all(a[3] == "top" for a in r["peak_annotations"]), "peak values hang below the valleys")
         self.assertLess(r["ylim"][0], 30.0, "room for the labels under the lowest valley")
         # absorbance display of the same files: peaks point up, labels above
@@ -503,7 +586,7 @@ class LanguageTests(unittest.TestCase):
     def test_english_labels(self):
         at = harness.run_app(harness.data_files("jasco_5SiC_950C.txt"), {"lang_radio": "English", "show_peaks": True})
         r = harness.report(at)
-        self.assertEqual(r["peaks"][0].keys() & {"Spectrum", "Position (cm⁻¹)", "Intensity"}, {"Spectrum", "Position (cm⁻¹)", "Intensity"})
+        self.assertEqual(r["peaks"][0].keys() & {"Spectrum", "Position (cm-1)", "Intensity"}, {"Spectrum", "Position (cm-1)", "Intensity"})
         self.assertTrue(any("Spectra" in h.value for h in at.sidebar.header))
 
 

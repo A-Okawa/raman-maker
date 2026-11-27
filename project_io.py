@@ -14,12 +14,14 @@ import re
 import tempfile
 from figure_style import STYLE_KEYS, validate_style_settings
 from palettes import PALETTES
+from qc import THRESHOLDS as QC_THRESHOLDS
 
 PROJECT_VERSION = 1
 PROJECT_FORMAT = "raman-maker-project"
 MAX_PROJECT_BYTES = 190 * 1024 * 1024
 MAX_DATA_BYTES = 140 * 1024 * 1024
 X_LIMITS = (-2000.0, 10000.0)
+
 GLOBAL_KEYS = (
     # measurement, arrangement and axes
     "spec_mode", "ir_display", "x_reverse",
@@ -43,11 +45,13 @@ GLOBAL_KEYS = (
     "show_panel", "lang_radio",
     # palette
     "palette", "palette_reverse", "palette_steps", "palette_from", "palette_to", "palette_base_color",
+    # quality checks: provisional thresholds and the panel's filter
+    *(f"qc_{key}" for key in QC_THRESHOLDS), "qc_show_all",
 ) + tuple(STYLE_KEYS)
 PATTERN_KEY = re.compile(r"(?:vis|ord|_val_lbl|sp_color|extra_offset|yoff|scale|yunit)_\d+$")
 BOOL_KEYS = {"x_reverse", "stack", "show_legend", "show_yticks", "show_minor", "spike_remove", "smooth_on", "show_peaks",
              "peak_label_rotate", "peak_fit", "marks_show_value", "bands_label", "show_zoom", "show_side_labels",
-             "show_panel", "palette_reverse", "show_raw", "show_baseline", "mfit_on", "mfit_show_total",
+             "show_panel", "palette_reverse", "qc_show_all", "show_raw", "show_baseline", "mfit_on", "mfit_show_total",
              "mfit_show_components", "mfit_fill"}
 BOUNDS = {
     "global_offset": (0., 3.), "major_tick": (1., 2000.), "minor_tick": (0.5, 1000.),
@@ -60,6 +64,7 @@ BOUNDS = {
     "fig_width": (25 / 25.4, 20.), "fig_height": (25 / 25.4, 20.),
     "font_size": (4, 28), "tick_font_size": (4, 28), "legend_font_size": (4, 28),
     "palette_steps": (0, 12), "palette_from": (1, 10000), "palette_to": (0, 10000),
+    **{f"qc_{key}": (low, high) for key, (_, low, high, _) in QC_THRESHOLDS.items()},
 }
 INT_KEYS = {"smooth_window", "smooth_order", "baseline_order", "peak_decimals", "marks_decimals", "marks_fontsize",
             "annotation_font_size", "label_fontsize", "palette_steps", "palette_from", "palette_to"}

@@ -19,6 +19,9 @@ from project_io import GLOBAL_KEYS, PATTERN_KEY, ProjectError, clean_settings, d
 from style_templates import TEMPLATE_KEYS, decode_style_template, encode_style_template
 
 SETTINGS = {
+    "qc_snr": 5.0, "qc_chi2_caution": 2.0, "qc_chi2_warning": 8.0, "qc_autocorr": 0.4, "qc_correlation": 0.95,
+    "qc_area_rel_err": 0.1, "qc_spike_neighbour": 0.3, "qc_step_jump": 2.0, "qc_gap": 4.0, "qc_absorbance_high": 2.5,
+    "qc_show_all": True,
     "spec_mode": "ftir", "ir_display": "transmittance", "x_reverse": True, "yunit_0": "transmittance_percent",
     "xrange": (200.0, 1000.0), "normalize_mode": "window", "norm_window": (770.0, 822.0), "stack": True,
     "global_offset": 1.1, "show_legend": True, "legend_loc": "upper left", "show_yticks": False,

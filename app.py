@@ -5,7 +5,10 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import plotly.graph_objects as go
+import hashlib
 import inspect
+import json
+import platform
 import os
 import re
 from datetime import datetime
@@ -19,7 +22,9 @@ from raman_io import (read_spectra, RamanParseError, SUPPORTED_EXTENSIONS, condi
                       spectrum_kind, native_y_units)
 from ui_translations import translate
 from raman_processing import (process, detect_peaks, fit_peak, fit_multipeak, parse_centers, to_absorbance,
-                              from_absorbance, MAX_FIT_PEAKS)
+                              from_absorbance, clipped_points, peak_prominences_of, MAX_FIT_PEAKS)
+import qc
+import qc_text
 from figure_style import (
     STYLE_DEFAULTS, STYLE_KEYS, FIGURE_PRESETS_MM, FONT_FAMILIES, METRIC_COMPATIBLE, mm_to_inches, inches_to_mm,
     font_rcparams, apply_mpl_style, export_figure, resolve_font, css_font_stack, validate_style_settings,
@@ -35,8 +40,8 @@ from plot_extras import (
     add_mpl_zoom_inset, add_plotly_zoom_inset, top_labels_height, UNIT_HTML,
 )
 
-APP_VERSION = "1.5"
-LAST_UPDATED = "2026-11-13"
+APP_VERSION = "1.6"
+LAST_UPDATED = "2026-11-27"
 LOCAL_MODE = os.environ.get("RAMAN_MAKER_LOCAL") == "1"
 # Named colours in the graph app's format; copy that app's colors.csv here to share its names.
 COLORS_FILE = Path(__file__).resolve().parent / "colors.csv"
@@ -1438,7 +1443,12 @@ if active:
                               th=f"{active[i].name}: ประมวลผลไม่สำเร็จ ({exc}) แสดงข้อมูลตามที่วัด",
                               vi=f"{active[i].name}: xử lý không thành công ({exc}); hiển thị dữ liệu gốc."))
                 mask = (spectrum.x >= x_min) & (spectrum.x <= x_max)
-                x, y, info = spectrum.x[mask], y_in[mask], {"spikes": 0, "baseline": None, "raw": y_in[mask]}
+                x, y, info = spectrum.x[mask], y_in[mask], {"spikes": 0, "baseline": None, "raw": y_in[mask],
+                                                            "processing_failed": str(exc)}
+            info["spikes_on"] = bool(spike_remove)
+            if IS_FTIR:
+                in_range = (spectrum.x >= min(x_min, x_max)) & (spectrum.x <= max(x_min, x_max))
+                info["clipped"] = clipped_points(spectrum.y, data_units(i))[in_range]
             info["signal"] = y
             if PEAKS_DOWN:
                 y = from_absorbance(y, "transmittance_percent")
@@ -1539,19 +1549,46 @@ if active:
     X_VALUE_NAME = "Wavenumber (cm-1)" if IS_FTIR else "Raman shift (cm-1)"
     FILE_STEM = "ftir" if IS_FTIR else "raman"
 
+    Y_VALUE_EN = {"absorbance": "Absorbance", "transmittance": "Transmittance (%)"}[ir_display] if IS_FTIR else "Intensity"
+
     def peak_rows():
+        """Peak table with English column names (the CSV keeps them; the screen shows translated ones)."""
         rows = []
         for row in curves:
-            for k in peak_indices(row):
-                entry = {ui("スペクトル", "Spectrum"): plain(row["label"]), ui("位置 (cm⁻¹)", "Position (cm⁻¹)"): round(float(row["x"][k]), 2),
-                         Y_VALUE_NAME: float(row["y"][k])}
+            indices = peak_indices(row)
+            snrs = peak_snr(row)
+            fits = single_fits(row) if peak_fit else [None] * len(indices)
+            for k, snr, fitted in zip(indices, snrs, fits):
+                entry = {"Spectrum": plain(row["label"]), "Position (cm-1)": round(float(row["x"][k]), 2),
+                         Y_VALUE_EN: float(row["y"][k]),
+                         "S/N": round(float(snr), 1) if np.isfinite(snr) else None,
+                         "QC": ("WARNING" if np.isfinite(snr) and snr < QC_TH["snr"] else "PASS" if np.isfinite(snr) else "NOT EVALUATED")}
                 if peak_fit:
-                    fitted = fit_peak(row["x"], row["signal"], float(row["x"][k]), peak_half_window, peak_model)
-                    entry.update({ui("フィット中心 (cm⁻¹)", "Fitted centre (cm⁻¹)"): round(fitted["center"], 2) if fitted["ok"] else None,
-                                  ui("半値幅 (cm⁻¹)", "FWHM (cm⁻¹)"): round(fitted["fwhm"], 2) if fitted["ok"] else None,
-                                  ui("高さ", "Height"): fitted["height"] if fitted["ok"] else None})
+                    entry.update({"Fitted centre (cm-1)": round(fitted["center"], 2) if fitted["ok"] else None,
+                                  "FWHM (cm-1)": round(fitted["fwhm"], 2) if fitted["ok"] else None,
+                                  "Height": fitted["height"] if fitted["ok"] else None,
+                                  "Fit on a bound": ", ".join(fitted.get("limits", [])) if fitted["ok"] else "failed"})
+                    if fitted["ok"] and fitted.get("limits"):
+                        entry["QC"] = "WARNING"
                 rows.append(entry)
         return rows
+
+    def shown_columns(frame):
+        """Translated column titles for the screen."""
+        names = {"Spectrum": ui("スペクトル", "Spectrum"), "Position (cm-1)": ui("位置 (cm⁻¹)", "Position (cm⁻¹)"),
+                 Y_VALUE_EN: Y_VALUE_NAME, "Fitted centre (cm-1)": ui("フィット中心 (cm⁻¹)", "Fitted centre (cm⁻¹)"),
+                 "FWHM (cm-1)": ui("半値幅 (cm⁻¹)", "FWHM (cm⁻¹)"), "Height": ui("高さ", "Height"),
+                 "Fit on a bound": ui("上限・下限に到達", "At a limit"), "Component": ui("成分", "Component"),
+                 "Centre (cm-1)": ui("中心 (cm⁻¹)", "Centre (cm⁻¹)"), "± centre": ui("± 中心", "± centre"),
+                 "± FWHM": ui("± 半値幅", "± FWHM"), "± height": ui("± 高さ", "± height"), "Area": ui("面積", "Area"),
+                 "± area": ui("± 面積", "± area"), "Area share (%)": ui("面積の割合 (%)", "Area share (%)"),
+                 "Area ratio (to no. 1)": ui("面積比（対 成分1）", "Area ratio (to no. 1)"),
+                 "Height ratio (to no. 1)": ui("高さ比（対 成分1）", "Height ratio (to no. 1)"),
+                 "Height / noise": ui("高さ／雑音", "Height / noise"), "Reduced chi2": ui("換算 χ²", "Reduced χ²"),
+                 "Residual autocorrelation": ui("残差の自己相関", "Residual autocorrelation"),
+                 "Largest parameter correlation": ui("最大のパラメータ相関", "Largest parameter correlation"),
+                 "On a bound": ui("上限・下限に到達", "At a limit"), "eta": "η", "R2": "R²"}
+        return frame.rename(columns=names)
 
     def plotted_y_limits():
         """Explicit y limits only when peak values hang below transmittance valleys: the lowest
@@ -1745,6 +1782,194 @@ if active:
                                   reverse_x=x_reverse)
         return pfig
 
+    # ===== 品質チェック（QC）: input, processing, peaks, fits of the visible spectra =====
+    for _key, (_default, _low, _high, _basis) in qc.THRESHOLDS.items():
+        _widget_default(f"qc_{_key}", _default, number=True)
+    _widget_default("qc_show_all", False, checkbox=True)
+    QC_TH = {key: float(st.session_state[f"qc_{key}"]) for key in qc.THRESHOLDS}
+    QC_LANG = _lang_code
+
+    def qc_subject(row):
+        return plain(row["label"]) or active[row["index"]].name
+
+    _single_fits: dict = {}
+
+    def single_fits(row):
+        """fit_peak at each detected peak (cached; also used by the peak table)."""
+        if row["index"] not in _single_fits:
+            _single_fits[row["index"]] = [fit_peak(row["x"], row["signal"], float(row["x"][k]), peak_half_window, peak_model)
+                                          for k in peak_indices(row)]
+        return _single_fits[row["index"]]
+
+    def peak_snr(row):
+        indices = peak_indices(row)
+        noise = prepared(row["index"])[2].get("noise", float("nan"))
+        return qc.peak_snr_values(peak_prominences_of(row["signal"], indices), noise) if len(indices) else np.array([])
+
+    def collect_qc():
+        items = []
+        for row in curves:
+            i, name = row["index"], qc_subject(row)
+            spectrum = active[i].spectrum
+            units = data_units(i) if IS_FTIR else "absorbance"
+            items += qc.input_checks(name, spectrum.x, spectrum.y, spectrum.metadata, kind="ftir" if IS_FTIR else "raman",
+                                     units=units, absorbance=to_absorbance(spectrum.y, units) if IS_FTIR else None, th=QC_TH)
+            x, _y, info = prepared(i)
+            if info.get("processing_failed"):
+                items.append(qc.item("processing", name, "fit_status", qc.FAIL, None, required=True,
+                                     message=str(info["processing_failed"])))
+            items += qc.processing_checks(name, info, points_used=len(x), x=x,
+                                          clipped=info.get("clipped") if IS_FTIR and units != "absorbance" else None,
+                                          normalize_mode=normalize_mode, normalize_window=norm_window, th=QC_TH)
+            if show_peaks:
+                indices = peak_indices(row)
+                items += qc.peak_checks(name, row["x"], row["signal"], indices, peak_prominences_of(row["signal"], indices),
+                                        info.get("noise", float("nan")), fits=single_fits(row) if peak_fit else None, th=QC_TH)
+            if mfit_on and mfit_centers:
+                items += qc.fit_checks(name, fit_of(row), smoothed=bool(smooth_on), th=QC_TH,
+                                       noise_before_smoothing=info.get("noise", float("nan")))
+        return items
+
+    qc_items = collect_qc()
+    QC_OVERALL = qc.overall(qc_items)
+
+    def qc_status(section=None, subject=None, component=None, sections=None):
+        chosen = [i for i in qc_items if (section is None or i["section"] == section)
+                  and (sections is None or i["section"] in sections)
+                  and (subject is None or i["subject"] == subject)
+                  and (component is None or i["component"] in (None, component))]
+        return qc.overall(chosen) if chosen else qc.NOT_EVALUATED
+
+    def qc_rendered(items, language):
+        rows = []
+        for it in items:
+            text = qc_text.render(it, language, QC_TH)
+            rows.append({"code": it["code"], "status": it["status"], "required": it["required"], **text,
+                         "component": it["component"], "value": "" if it["value"] is None else str(it["value"])})
+        return rows
+
+    def csv_file(frame, stem, sections):
+        """CSV bytes and file name. Column names are English; results that do not pass carry a # header
+        and, for WARNING / FAIL, the status in the file name (so they are not taken for clean results)."""
+        status = qc_status(sections=sections)
+        body = frame.to_csv(index=False)
+        name = f"{stem}.csv"
+        if status != qc.PASS:
+            problems = [r for r in qc_rendered([i for i in qc_items if i["section"] in sections and i["status"] in (qc.WARNING, qc.FAIL, qc.CAUTION)], "en")]
+            header = [f"# Raman Maker {APP_VERSION} QC: {status} — see the QC report ({FILE_STEM}_qc_report.json)"]
+            header += [f"# {r['status']}: {r['subject']} — {r['name']}: {r['reason']}".replace("\n", " ") for r in problems[:30]]
+            if status == qc.NOT_EVALUATED:
+                header.append("# Some required checks could not be evaluated.")
+            body = "\n".join(header) + "\n" + body
+            if status in (qc.WARNING, qc.FAIL):
+                name = f"{stem}_QC-{status}.csv"
+        return body.encode("utf-8-sig"), name
+
+    def qc_report():
+        """Everything needed to see how the numbers were made: inputs, processing, peaks, fit, checks."""
+        import scipy
+        import matplotlib as _mpl
+        inputs, per_spectrum = [], []
+        for row in curves:
+            i, name = row["index"], qc_subject(row)
+            file = active[i]
+            read = dict(file.spectrum.metadata.get("_qc_read") or {})
+            inputs.append({"spectrum": name, "file": file.source, "sha256": hashlib.sha256(file._data).hexdigest(),
+                           "format": file.spectrum.metadata.get("format"), "points_read": int(len(file.spectrum.x)),
+                           "y_units": data_units(i) if IS_FTIR else "intensity", "reader": read})
+            x, _y, info = prepared(i)
+            per_spectrum.append({"spectrum": name, "points_used": int(len(x)), "noise_sigma_before_smoothing": info.get("noise"),
+                                 "spikes_replaced": info.get("spike_points", []), "normalization_problem": info.get("normalize_problem"),
+                                 "ftir_clipped_points": int(np.sum(info["clipped"])) if info.get("clipped") is not None else None,
+                                 "processing_failed": info.get("processing_failed")})
+        steps = ["crop to the range"] + (["spike removal"] if spike_remove else []) + (["smoothing"] if smooth_on else []) \
+            + (["baseline subtraction"] if baseline_method != "none" else []) + (["normalisation"] if normalize_mode != "none" else [])
+        report = {
+            "format": "raman-maker-qc-report", "version": 1,
+            "created": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "app": {"name": "Raman Maker", "version": APP_VERSION},
+            "environment": {"python": platform.python_version(), "numpy": np.__version__, "scipy": scipy.__version__,
+                            "pandas": pd.__version__, "matplotlib": _mpl.__version__, "streamlit": st.__version__},
+            "random_numbers": "none used: every step is deterministic",
+            "overall": QC_OVERALL, "counts": qc.counts(qc_items),
+            "thresholds": {key: {"value": QC_TH[key], "default": default, "provisional": True, "basis": basis}
+                           for key, (default, _low, _high, basis) in qc.THRESHOLDS.items()},
+            "measurement": {"mode": spec_mode, "display": ir_display if IS_FTIR else "intensity"},
+            "inputs": inputs,
+            "processing": {
+                "order": steps, "x_range_cm-1": [x_min, x_max],
+                "ftir_conversion": "A = -log10(T); T at or below 1e-8 (fraction) clipped to A = 8" if IS_FTIR else None,
+                "spike_removal": {"on": bool(spike_remove), "threshold_modified_z": spike_threshold if spike_remove else None,
+                                  "method": "Whitaker & Hayes (2018); spikes replaced by the mean of non-spike points within 3 points"},
+                "smoothing": {"on": bool(smooth_on), "method": "Savitzky-Golay", "window_points": smooth_window if smooth_on else None,
+                              "polynomial_order": smooth_order if smooth_on else None},
+                "baseline": {"method": baseline_method, "parameters": baseline_params if baseline_method != "none" else {}},
+                "normalisation": {"mode": normalize_mode, "window_cm-1": list(norm_window) if normalize_mode == "window" else None},
+                "per_spectrum": per_spectrum,
+            },
+            "peaks": None, "fit": None,
+            "items": [{k: v for k, v in r.items()} for r in qc_rendered(qc_items, "en")],
+        }
+        if show_peaks:
+            report["peaks"] = {
+                "detection": {"method": "scipy.signal.find_peaks on the processed signal", "prominence_fraction": peak_prom,
+                              "min_distance_cm-1": peak_distance},
+                "snr": "prominence / noise sigma of the data before smoothing",
+                "single_fit": {"on": bool(peak_fit), "model": peak_model, "half_window_cm-1": peak_half_window,
+                               "background": "linear", "optimizer": "scipy.optimize.curve_fit (bounded, maxfev 4000)"} if peak_fit else None,
+                "spectra": [{"spectrum": qc_subject(row), "peaks": [
+                    {"x": float(row["x"][k]), "snr": float(sn),
+                     **({"fit": {kk: f[kk] for kk in ("ok", "center", "fwhm", "height", "area", "limits") if kk in f}} if peak_fit else {})}
+                    for n, (k, sn) in enumerate(zip(peak_indices(row), peak_snr(row)))
+                    for f in ([single_fits(row)[n]] if peak_fit else [None])]} for row in curves],
+            }
+        if mfit_on and mfit_centers:
+            formulas = {"lorentzian": "h / (1 + 4((x - x0)/w)^2)", "gaussian": "h exp(-4 ln2 ((x - x0)/w)^2)",
+                        "pvoigt": "h [eta L + (1 - eta) G] with a common FWHM w"}
+            report["fit"] = {
+                "model": mfit_model, "formula": formulas[mfit_model] + " per component (w = FWHM)",
+                "background": {"none": "none", "constant": "+ b0", "linear": "+ b0 + b1 (x - mean x)"}[mfit_background],
+                "range_cm-1": list(mfit_range), "initial_centres_cm-1": mfit_centers,
+                "constraints": {"centre": f"start ± {mfit_max_shift} cm-1 (and inside the range)", "height": ">= 0",
+                                "fwhm": "2 point spacings to the range width", "eta": "0 to 1" if mfit_model == "pvoigt" else None},
+                "initial_values": "height from the data at the start position, FWHM = range / (4 × components), eta = 0.5",
+                "optimizer": "scipy.optimize.curve_fit, Trust Region Reflective (bounded), maxfev 20000",
+                "errors": "standard errors from the covariance matrix, assuming independent noise; none for parameters on a bound",
+                "data": "processed signal" + (" (absorbance)" if IS_FTIR else "") + (" — smoothed" if smooth_on else ""),
+                "results": [],
+            }
+            for row in curves:
+                result = fit_of(row)
+                report["fit"]["results"].append({
+                    "spectrum": qc_subject(row), "ok": result["ok"], "message": result["message"],
+                    "points": int(len(result["x"])), "r2": result["r2"], "rmse": result["rmse"], "chi2_red": result["chi2_red"],
+                    "residual_autocorrelation": result["autocorr"], "max_parameter_correlation": result["max_correlation"],
+                    "noise_sigma": result["noise"],
+                    "components": [{k: c[k] for k in ("start", "center", "center_err", "fwhm", "fwhm_err", "height", "height_err",
+                                                      "area", "area_err", "eta", "eta_err", "share", "snr", "limits")}
+                                   for c in result["components"]]})
+        return report
+
+    def _json_default(value):
+        if isinstance(value, (np.integer,)):
+            return int(value)
+        if isinstance(value, (np.floating,)):
+            return None if not np.isfinite(value) else float(value)
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, (set, tuple)):
+            return list(value)
+        return str(value)
+
+    def _finite(value):
+        if isinstance(value, float) and not np.isfinite(value):
+            return None
+        if isinstance(value, dict):
+            return {k: _finite(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [_finite(v) for v in value]
+        return value
+
     # ===== 描画 & ダウンロード =====
     with col_graph:
         interactive_tab, export_tab = st.tabs([T["interactive_preview"], T["export_preview"]])
@@ -1769,14 +1994,89 @@ if active:
             st.caption(ui("軸や文字が端で切れる場合は、余白または文字サイズを調整してください。注記のラベルは図の上に出るので、上余白を広げると収まります。",
                           "If text or axes are clipped, adjust the margins or font sizes. Mark labels sit above the axes; widen the top margin to fit them."))
 
+        # ----- QC Report (folded; a line above it when something needs a look)
+        _problems = [i for i in qc_items if i["status"] in (qc.WARNING, qc.FAIL)]
+        if curves and QC_OVERALL in (qc.WARNING, qc.FAIL):
+            st.warning(qc_text.panel("alert", QC_LANG, status=QC_OVERALL, count=len(_problems)))
+        if curves:
+            _counts = qc.counts(qc_items)
+            _summary = " · ".join(f"{level} {_counts[level]}" for level in qc.LEVELS if _counts[level])
+            with st.expander(f"{qc_text.panel('title', QC_LANG)} — {qc_text.STATUS_BADGES[QC_OVERALL]}  ({_summary})", expanded=False):
+                st.caption(qc_text.panel("about", QC_LANG))
+                st.markdown(f"**{qc_text.panel('overall', QC_LANG)}: {qc_text.STATUS_BADGES[QC_OVERALL]}**")
+                _show_all = st.checkbox(qc_text.panel("show_all", QC_LANG), key="qc_show_all")
+                _rows = [r for r in qc_rendered(qc_items, QC_LANG) if _show_all or r["status"] != qc.PASS]
+                if _rows:
+                    _order = {qc.FAIL: 0, qc.WARNING: 1, qc.CAUTION: 2, qc.NOT_EVALUATED: 3, qc.PASS: 4}
+                    _rows.sort(key=lambda r: _order[r["status"]])
+                    st.dataframe(pd.DataFrame([{
+                        qc_text.panel("col_status", QC_LANG): qc_text.STATUS_BADGES[r["status"]],
+                        qc_text.panel("col_section", QC_LANG): r["section"],
+                        qc_text.panel("col_subject", QC_LANG): r["subject"],
+                        qc_text.panel("col_name", QC_LANG): r["name"],
+                        qc_text.panel("col_value", QC_LANG): r["value"],
+                        qc_text.panel("col_criterion", QC_LANG): r["criterion"],
+                        qc_text.panel("col_reason", QC_LANG): r["reason"],
+                        qc_text.panel("col_advice", QC_LANG): r["advice"]} for r in _rows]), hide_index=True)
+                else:
+                    st.caption(qc_text.panel("nothing", QC_LANG))
+                # what was done to the data, in order
+                st.markdown(f"**{qc_text.panel('processing_log', QC_LANG)}**")
+                _log = [qc_text.panel("log_range", QC_LANG, low=f"{x_min:g}", high=f"{x_max:g}")]
+                if IS_FTIR:
+                    _log.append(qc_text.panel("log_ftir", QC_LANG, display=ir_display))
+                if spike_remove:
+                    _log.append(qc_text.panel("log_spikes", QC_LANG, threshold=f"{spike_threshold:g}",
+                                              count=sum(len(prepared(r["index"])[2].get("spike_points", [])) for r in curves)))
+                if smooth_on:
+                    _log.append(qc_text.panel("log_smooth", QC_LANG, window=smooth_window, order=smooth_order))
+                if baseline_method != "none":
+                    _log.append(qc_text.panel("log_baseline", QC_LANG, method=baseline_method,
+                                              params=", ".join(f"{k}={v:g}" if isinstance(v, (int, float)) else f"{k}={v}"
+                                                               for k, v in (baseline_params or {}).items())))
+                if normalize_mode != "none":
+                    _log.append(qc_text.panel("log_normalize", QC_LANG, mode=normalize_mode,
+                                              window=f"({norm_window[0]:g}–{norm_window[1]:g} cm⁻¹)" if normalize_mode == "window" else ""))
+                if len(_log) == 1:
+                    _log.append(qc_text.panel("log_none", QC_LANG))
+                st.markdown("\n".join(f"{n}. {line}" for n, line in enumerate(_log, start=1)))
+                st.caption(qc_text.panel("log_note", QC_LANG))
+                _ne = [r for r in qc_rendered(qc_items, QC_LANG) if r["status"] == qc.NOT_EVALUATED and r["code"] not in ("r2", "rmse")]
+                if _ne:
+                    st.markdown(f"**{qc_text.panel('not_evaluated', QC_LANG)}**")
+                    st.markdown("\n".join(f"- {r['subject']} · {r['name']}: {r['reason']}" for r in _ne))
+                # (Streamlit 1.32 does not allow an expander inside an expander: a checkbox opens the criteria)
+                if st.checkbox(qc_text.panel("thresholds", QC_LANG), key="_qc_edit_thresholds"):
+                    st.caption(qc_text.panel("thresholds_note", QC_LANG))
+                    _tc = st.columns(2)
+                    for _n, (_key, (_default, _low, _high, _basis)) in enumerate(qc.THRESHOLDS.items()):
+                        _tc[_n % 2].number_input(qc_text._pick(qc_text.THRESHOLD_LABELS[_key], QC_LANG), float(_low), float(_high),
+                                                 key=f"qc_{_key}", help=_basis + f" (default {_default:g})", format="%g")
+
+                    def _reset_thresholds():
+                        for _k, (_d, *_rest) in qc.THRESHOLDS.items():
+                            st.session_state[f"qc_{_k}"] = _d
+                    st.button(qc_text.panel("reset", QC_LANG), on_click=_reset_thresholds, key="qc_reset")
+                _q1, _q2 = st.columns(2)
+                _q1.download_button(qc_text.panel("download_json", QC_LANG),
+                                    data=json.dumps(_finite(qc_report()), ensure_ascii=False, indent=1, default=_json_default).encode("utf-8"),
+                                    file_name=f"{FILE_STEM}_qc_report.json", mime="application/json", **WIDE_DOWNLOAD)
+                _q2.download_button(qc_text.panel("download_csv", QC_LANG),
+                                    data=pd.DataFrame(qc_rendered(qc_items, "en"))[["section", "subject", "component", "name", "code", "status",
+                                                                                     "required", "value", "criterion", "reason", "advice"]]
+                                    .to_csv(index=False).encode("utf-8-sig"),
+                                    file_name=f"{FILE_STEM}_qc_items.csv", mime="text/csv", **WIDE_DOWNLOAD)
+                st.caption(qc_text.panel("files_note", QC_LANG))
+
         if show_peaks:
             with st.expander(ui("ピーク一覧", "Peak table"), expanded=False):
                 rows = peak_rows()
                 if rows:
                     table = pd.DataFrame(rows)
-                    st.dataframe(table, hide_index=True)
+                    st.dataframe(shown_columns(table), hide_index=True)
+                    _data, _name = csv_file(table, f"{FILE_STEM}_peaks", ("input", "processing", "peaks"))
                     st.download_button(ui("📥 ピーク一覧を CSV で保存", "📥 Save the peak table as CSV"),
-                        data=table.to_csv(index=False).encode("utf-8-sig"), file_name=f"{FILE_STEM}_peaks.csv", mime="text/csv", **WIDE_DOWNLOAD)
+                        data=_data, file_name=_name, mime="text/csv", **WIDE_DOWNLOAD)
                     st.caption(ui("位置は表示範囲・前処理後の極大点です。フィットを有効にすると、ローレンツ／ガウス関数の中心と半値幅を併記します。",
                                   "Positions are local maxima after the range and processing. With fitting on, the fitted centre and FWHM are listed too."))
                 else:
@@ -1787,70 +2087,58 @@ if active:
                     st.info(ui("サイドバーの「ピーク分離フィット」に、ピークの初期位置（フィット範囲の中）を入力してください。",
                                "Enter the starting positions (inside the fit range) under “Fit overlapping peaks” in the sidebar."))
                 else:
-                    _reasons = {"too_few_points": ui("範囲内の点が足りません", "too few points in the range"),
-                                "center_outside": ui("初期位置がデータの範囲外です", "a starting position lies outside the data"),
-                                "flat": ui("範囲内のデータが平坦です", "the data are flat in the range")}
-                    _checks = {
-                        "misfit": ui("残差が雑音より大きい（換算 χ² が 3 超）。成分の数・関数・バックグラウンドが合っていない可能性があります。",
-                                     "the residual exceeds the noise (reduced χ² above 3): the number of components, the model or the background may not match."),
-                        "structured_residual": ui("残差が波打っている（隣り合う点の相関が 0.5 超）。取りこぼした成分か、形の合わない関数が疑われます。",
-                                                  "the residual has waves (neighbouring points correlate above 0.5): a missing component or a mismatched shape."),
-                        "correlated": ui("パラメータ同士が強く相関（0.98 超）。成分が互いに打ち消し合え、個々の値は決まっていません。成分を減らすか範囲を見直してください。",
-                                         "parameters correlate strongly (above 0.98): components can trade off and the individual values are not determined. Use fewer components or review the range."),
-                        "at_limit": ui("中心が動ける幅の端、または幅の上限・下限に張り付いた成分があります。", "a component ended at the edge of the allowed shift or at a width limit."),
-                        "weak_component": ui("高さが雑音の 3 倍に満たない成分があります。その成分は有意とは言えません。", "a component is lower than three times the noise and is not significant."),
-                        "uncertain_area": ui("面積の標準誤差が 20 % を超える成分があります。", "the standard error of an area exceeds 20 %."),
-                        "narrow_component": ui("半値幅がデータ点 4 つ分より狭い成分があります。スパイクや雑音に合わせている可能性があります。",
-                                               "a component is narrower than four data points and may follow a spike or noise."),
-                        "no_errors": ui("誤差を見積もれませんでした（パラメータが決まっていません）。", "the errors could not be estimated (the parameters are not determined)."),
-                    }
                     _findings = []
                     fit_rows, curve_frames, residual_fig = [], [], go.Figure()
                     for row in curves:
                         result = fit_of(row)
                         name = plain(row["label"])
+                        subject = qc_subject(row)
+                        _fit_status = qc_status(section="fit", subject=subject)
                         if not result["ok"]:
-                            _why = result["message"]
-                            st.warning(f"{name}: " + ui("フィットできませんでした（", "the fit failed (")
-                                       + _reasons.get(_why, ui("収束しませんでした", "no convergence")) + ui("）。", ")."))
+                            st.error(f"{name}: QC {_fit_status} — " + qc_text.render(
+                                next(i for i in qc_items if i["subject"] == subject and i["code"] == "fit_status"), QC_LANG, QC_TH)["reason"])
                             continue
+                        if _fit_status != qc.PASS:
+                            _findings.append((name, _fit_status))
                         first = result["components"][0]
-                        _findings += [(name, code) for code in result["warnings"]]
-                        _verdict = "⚠ " + str(len(result["warnings"])) if result["warnings"] else "✓"
+
+                        def _r(value, digits):
+                            return round(value, digits) if value is not None and np.isfinite(value) else None
+
                         for number, c in enumerate(result["components"], start=1):
                             fit_rows.append({
-                                ui("スペクトル", "Spectrum"): name, ui("成分", "Component"): number,
-                                ui("中心 (cm⁻¹)", "Centre (cm⁻¹)"): round(c["center"], 2), ui("± 中心", "± centre"): round(c["center_err"], 2),
-                                ui("半値幅 (cm⁻¹)", "FWHM (cm⁻¹)"): round(c["fwhm"], 2), ui("± 半値幅", "± FWHM"): round(c["fwhm_err"], 2),
-                                ui("高さ", "Height"): c["height"], ui("± 高さ", "± height"): c["height_err"],
-                                ui("面積", "Area"): c["area"], ui("± 面積", "± area"): c["area_err"],
-                                ui("面積の割合 (%)", "Area share (%)"): round(100 * c["share"], 1),
-                                ui("面積比（対 成分1）", "Area ratio (to no. 1)"): c["area"] / first["area"] if first["area"] > 0 else None,
-                                ui("高さ比（対 成分1）", "Height ratio (to no. 1)"): c["height"] / first["height"] if first["height"] > 0 else None,
-                                **({"η": round(c["eta"], 3)} if mfit_model == "pvoigt" else {}),
-                                ui("高さ／雑音", "Height / noise"): round(c["snr"], 1) if np.isfinite(c["snr"]) else None,
-                                ui("判定", "Check"): _verdict,
-                                "R²": round(result["r2"], 5), "RMSE": result["rmse"],
-                                ui("換算 χ²", "Reduced χ²"): round(result["chi2_red"], 2) if np.isfinite(result["chi2_red"]) else None,
-                                ui("残差の自己相関", "Residual autocorrelation"): round(result["autocorr"], 2) if np.isfinite(result["autocorr"]) else None,
-                                ui("最大のパラメータ相関", "Largest parameter correlation"): round(result["max_correlation"], 3) if np.isfinite(result["max_correlation"]) else None,
-                                ui("上限・下限に到達", "At a limit"): "⚠" if c["at_limit"] else "",
+                                "Spectrum": name, "Component": number,
+                                "Centre (cm-1)": round(c["center"], 2), "± centre": _r(c["center_err"], 2),
+                                "FWHM (cm-1)": round(c["fwhm"], 2), "± FWHM": _r(c["fwhm_err"], 2),
+                                "Height": c["height"], "± height": _r(c["height_err"], 12),
+                                "Area": c["area"], "± area": _r(c["area_err"], 12),
+                                "Area share (%)": round(100 * c["share"], 1),
+                                "Area ratio (to no. 1)": c["area"] / first["area"] if first["area"] > 0 else None,
+                                "Height ratio (to no. 1)": c["height"] / first["height"] if first["height"] > 0 else None,
+                                **({"eta": round(c["eta"], 3)} if mfit_model == "pvoigt" else {}),
+                                "Height / noise": _r(c["snr"], 1),
+                                "QC": qc_status(section="fit", subject=subject, component=number),
+                                "R2": round(result["r2"], 5), "RMSE": result["rmse"],
+                                "Reduced chi2": _r(result["chi2_red"], 2),
+                                "Residual autocorrelation": _r(result["autocorr"], 2),
+                                "Largest parameter correlation": _r(result["max_correlation"], 3),
+                                "On a bound": ", ".join(c.get("limits", [])),
                             })
-                        frame = {ui("スペクトル", "Spectrum"): name, X_VALUE_NAME: result["x"], ui("データ", "Data"): result["y"],
-                                 ui("フィットの合計", "Fitted sum"): result["fit"], ui("バックグラウンド", "Background"): result["background"],
-                                 ui("残差", "Residual"): result["residual"]}
+                        frame = {"Spectrum": name, X_VALUE_NAME: result["x"], "Data": result["y"],
+                                 "Fitted sum": result["fit"], "Background": result["background"], "Residual": result["residual"]}
                         for number, curve in enumerate(result["curves"], start=1):
-                            frame[ui(f"成分 {number}", f"Component {number}", th=f"องค์ประกอบ {number}", vi=f"Thành phần {number}")] = curve
+                            frame[f"Component {number}"] = curve
                         curve_frames.append(pd.DataFrame(frame))
                         residual_fig.add_trace(go.Scatter(x=result["x"], y=result["residual"], mode="lines", name=name,
                                                           line=dict(color=row["color"], width=1.2)))
                     if fit_rows:
                         fit_table = pd.DataFrame(fit_rows)
-                        st.dataframe(fit_table, hide_index=True)
+                        st.dataframe(shown_columns(fit_table), hide_index=True)
                         if _findings:
+                            _shown = [i for i in qc_rendered([i for i in qc_items if i["section"] == "fit" and i["status"] in (qc.CAUTION, qc.WARNING, qc.FAIL)], QC_LANG)]
                             st.warning(ui("**確認が必要なフィットがあります**", "**Some fits need a look**") + "\n"
-                                       + "\n".join(f"- {_name}: {_checks[_code]}" for _name, _code in _findings))
-                        else:
+                                       + "\n".join(f"- {r['status']} · {r['subject']} · {r['name']}: {r['reason']}" for r in _shown))
+                        elif qc_status(section="fit") == qc.PASS:
                             st.success(ui("自動チェックでは問題は見つかりませんでした（残差・雑音比・パラメータ相関・上限下限・誤差）。残差のグラフも目で確かめてください。",
                                           "The automatic checks found nothing (residual, noise ratio, parameter correlation, limits, errors). Look at the residual plot as well."))
                         if smooth_on:
@@ -1865,13 +2153,12 @@ if active:
                         residual_fig.update_yaxes(showline=True, linecolor="black", showgrid=False, zeroline=False, ticks="outside")
                         st.plotly_chart(residual_fig, config={"displaylogo": False}, **WIDE_CHART)
                         _d1, _d2 = st.columns(2)
+                        _data, _name = csv_file(fit_table, f"{FILE_STEM}_fit", ("input", "processing", "fit"))
                         _d1.download_button(ui("📥 フィット結果を CSV で保存", "📥 Save the fit results as CSV"),
-                            data=fit_table.to_csv(index=False).encode("utf-8-sig"), file_name=f"{FILE_STEM}_fit.csv", mime="text/csv", **WIDE_DOWNLOAD)
+                            data=_data, file_name=_name, mime="text/csv", **WIDE_DOWNLOAD)
+                        _data, _name = csv_file(pd.concat(curve_frames, ignore_index=True), f"{FILE_STEM}_fit_curves", ("input", "processing", "fit"))
                         _d2.download_button(ui("📥 フィット曲線を CSV で保存", "📥 Save the fitted curves as CSV"),
-                            data=pd.concat(curve_frames, ignore_index=True).to_csv(index=False).encode("utf-8-sig"),
-                            file_name=f"{FILE_STEM}_fit_curves.csv", mime="text/csv", **WIDE_DOWNLOAD)
-                        st.caption(ui("目安：換算 χ² は 1 前後（雑音はデータの 2 階差分から推定）、残差の自己相関は 0 付近、パラメータ相関は 0.98 未満、高さ／雑音は 3 以上。",
-                                      "Guide: reduced χ² near 1 (the noise is estimated from second differences of the data), residual autocorrelation near 0, parameter correlation below 0.98, height / noise of 3 or more."))
+                            data=_data, file_name=_name, mime="text/csv", **WIDE_DOWNLOAD)
                         st.caption(ui("前処理後のデータ" + ("（吸光度）" if IS_FTIR else "") + "に対する最小二乗フィットです。± は共分散行列から求めた標準誤差で、点ごとの雑音が独立であることを仮定しています。"
                                       "残差に波打ちが残る場合は、成分の数か関数が合っていません。面積・高さは正規化とベースラインの設定に依存するので、比で比べてください。"
                                       + ("　透過率の表示では曲線は図に重ねません（吸光度の表示で確認できます）。" if PEAKS_DOWN else ""),
@@ -1885,13 +2172,14 @@ if active:
                                       "Nếu phần dư còn dạng sóng thì số thành phần hoặc hàm chưa phù hợp. Diện tích và chiều cao phụ thuộc vào chuẩn hóa và đường nền, nên hãy so sánh theo tỉ số."
                                       + (" Khi hiển thị độ truyền qua, các đường cong không được vẽ lên hình (xem ở chế độ độ hấp thụ)." if PEAKS_DOWN else "")))
         with st.expander(ui("処理後のデータ", "Processed data"), expanded=False):
-            frames = [pd.DataFrame({ui("スペクトル", "Spectrum"): plain(row["label"]), X_VALUE_NAME: row["x"],
-                                    Y_VALUE_NAME + ui("（処理後）", " (processed)"): row["y"],
-                                    Y_VALUE_NAME + ui("（図の位置）", " (as plotted)"): row["y_plot"]}) for row in curves]
+            frames = [pd.DataFrame({"Spectrum": plain(row["label"]), X_VALUE_NAME: row["x"],
+                                    Y_VALUE_EN + " (processed)": row["y"],
+                                    Y_VALUE_EN + " (as plotted)": row["y_plot"]}) for row in curves]
             if frames:
                 processed = pd.concat(frames, ignore_index=True)
+                _data, _name = csv_file(processed, f"{FILE_STEM}_processed", ("input", "processing"))
                 st.download_button(ui("📥 処理後のデータを CSV で保存", "📥 Save the processed data as CSV"),
-                    data=processed.to_csv(index=False).encode("utf-8-sig"), file_name=f"{FILE_STEM}_processed.csv", mime="text/csv", **WIDE_DOWNLOAD)
+                    data=_data, file_name=_name, mime="text/csv", **WIDE_DOWNLOAD)
                 st.caption(ui("表示範囲で切り出し、スパイク除去・平滑化・ベースライン・正規化を掛けた値と、オフセットを足した図の位置の値です（縦持ち）。",
                               "Values after the range, spikes, smoothing, baseline and normalisation, and the plotted values with offsets (long format)."))
 

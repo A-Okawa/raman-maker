@@ -118,9 +118,14 @@ class NormalizeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             normalize(y, "nope")
 
-    def test_window_outside_the_data_falls_back_to_max(self):
+    def test_window_outside_the_data_is_reported_not_replaced(self):
+        # Before 1.6 an empty window silently switched to the global maximum.
         y = lorentz(500, 90, 5)
-        self.assertAlmostEqual(float(normalize(y, "window", X, (5000, 6000)).max()), 1.0)
+        with self.assertRaises(ValueError):
+            normalize(y, "window", X, (5000, 6000))
+        x, out, info = process(X, y, normalize_mode="window", normalize_window=(5000, 6000))
+        np.testing.assert_array_equal(out, y)
+        self.assertEqual(info["normalize_problem"], "window_empty")
 
 
 class PeakTests(unittest.TestCase):
